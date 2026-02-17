@@ -542,41 +542,10 @@ class TrainerAPI:
             self.device,
         )
 
-    def run(self, host: str = "0.0.0.0", port: int = 6060, reload: bool = False):
-        """Start the HTTP server."""
+    def run(self, host: str = "0.0.0.0", port: int = 6060):
+        """Start the HTTP server. No auto-reload — trainer holds in-memory state."""
         import uvicorn
-        if reload:
-            # Use string import so uvicorn can restart the process
-            uvicorn.run(
-                "acc.trainer_api:_default_app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["acc"],
-            )
-        else:
-            uvicorn.run(self.app, host=host, port=port)
-
-
-# Module-level app for uvicorn --reload mode
-_default_api: Optional[TrainerAPI] = None
-
-
-def _get_default_api() -> TrainerAPI:
-    global _default_api
-    if _default_api is None:
-        _default_api = TrainerAPI()
-    return _default_api
-
-
-# Lazy ASGI app reference for uvicorn reload
-class _LazyApp:
-    """ASGI app that lazily creates the TrainerAPI singleton."""
-    async def __call__(self, scope, receive, send):
-        app = _get_default_api().app
-        await app(scope, receive, send)
-
-_default_app = _LazyApp()
+        uvicorn.run(self.app, host=host, port=port)
 
 
 def _resolve_task_class(class_name: str):
