@@ -331,6 +331,31 @@ class TrainerAPI:
             result.sort(key=lambda e: e.get("step", 0))
             return result
 
+        @app.get("/jobs/{job_id}/loss_at")
+        async def job_loss_at(job_id: str, index: int = -1):
+            """Single loss entry by index.  index=0 for first, index=-1 for latest.
+
+            Returns a single step_info dict, or 404 if out of range.
+            Lightweight endpoint for quick health checks during training.
+            """
+            job = self.jobs.get(job_id)
+            if job is None:
+                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+            losses = job.losses
+            if not losses:
+                return JSONResponse({"error": "No losses yet"}, status_code=404)
+            try:
+                entry = losses[index]
+            except IndexError:
+                return JSONResponse({"error": f"Index {index} out of range (have {len(losses)})"}, status_code=404)
+            return {
+                **entry,
+                "n_total_losses": len(losses),
+                "job_state": job.state,
+                "job_step": job.current_step,
+                "job_total_steps": job.total_steps,
+            }
+
         @app.get("/jobs/current/loss_summary")
         async def current_job_loss_summary():
             """Per-task loss summary for the currently running job."""
