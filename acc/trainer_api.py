@@ -339,9 +339,23 @@ class TrainerAPI:
             ]
 
         # -- Recipes --
+        # Static routes MUST come before parameterized {name} routes
         @app.get("/recipes")
         async def list_recipes():
             return self.recipe_registry.list()
+
+        @app.get("/recipes/current")
+        async def current_recipe():
+            job = self.recipe_runner.current()
+            if job is None:
+                return JSONResponse(content=None)
+            return job.to_dict()
+
+        @app.post("/recipes/stop")
+        async def stop_recipe():
+            self.recipe_runner.stop()
+            job = self.recipe_runner.current()
+            return job.to_dict() if job else {"status": "no running recipe"}
 
         @app.get("/recipes/{name}")
         async def get_recipe(name: str):
@@ -360,19 +374,6 @@ class TrainerAPI:
                 return job.to_dict()
             except RuntimeError as e:
                 return JSONResponse({"error": str(e)}, status_code=409)
-
-        @app.post("/recipes/stop")
-        async def stop_recipe():
-            self.recipe_runner.stop()
-            job = self.recipe_runner.current()
-            return job.to_dict() if job else {"status": "no running recipe"}
-
-        @app.get("/recipes/current")
-        async def current_recipe():
-            job = self.recipe_runner.current()
-            if job is None:
-                return JSONResponse(content=None)
-            return job.to_dict()
 
         # -- Checkpoint tree --
         @app.get("/checkpoints/tree")
