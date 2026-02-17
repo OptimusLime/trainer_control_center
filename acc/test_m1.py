@@ -30,6 +30,7 @@ from acc.tasks.base import TaskError
 from acc.trainer import Trainer
 from acc.jobs import JobManager
 from acc.checkpoints import CheckpointStore
+from acc.eval_metric import EvalMetric
 
 
 def main():
@@ -117,15 +118,15 @@ def main():
     print("\n=== 5. Evaluate ===")
     results = trainer.evaluate_all()
     assert "digits" in results, "digits missing from eval results"
-    assert "accuracy" in results["digits"], "accuracy missing from digits eval"
-    assert results["digits"]["accuracy"] > 0.1, (
-        f"Accuracy too low: {results['digits']['accuracy']}"
+    assert EvalMetric.ACCURACY in results["digits"], "accuracy missing from digits eval"
+    assert results["digits"][EvalMetric.ACCURACY] > 0.1, (
+        f"Accuracy too low: {results['digits'][EvalMetric.ACCURACY]}"
     )
     assert "recon" in results, "recon missing from eval results"
-    assert "psnr" in results["recon"], "psnr missing from recon eval"
-    print(f"Accuracy: {results['digits']['accuracy']:.4f}")
-    print(f"PSNR: {results['recon']['psnr']:.1f}")
-    print(f"L1: {results['recon']['l1']:.4f}")
+    assert EvalMetric.PSNR in results["recon"], "psnr missing from recon eval"
+    print(f"Accuracy: {results['digits'][EvalMetric.ACCURACY]:.4f}")
+    print(f"PSNR: {results['recon'][EvalMetric.PSNR]:.1f}")
+    print(f"L1: {results['recon'][EvalMetric.L1]:.4f}")
     print("PASS: Evaluation produces real metrics")
 
     # ── 6. Checkpoint ──
@@ -137,18 +138,18 @@ def main():
     print("PASS: Checkpoint saved to disk")
 
     # Save metrics at this point for later comparison
-    accuracy_at_cp1 = results["digits"]["accuracy"]
+    accuracy_at_cp1 = results["digits"][EvalMetric.ACCURACY]
 
     # ── 7. Train more ──
     print("\n=== 7. Train 500 more steps ===")
     job2 = jobs.start(trainer, steps=500, checkpoint_id=cp1.id)
     results2 = trainer.evaluate_all()
-    print(f"Accuracy after 1000 total steps: {results2['digits']['accuracy']:.4f}")
-    print(f"PSNR after 1000 total steps: {results2['recon']['psnr']:.1f}")
+    print(f"Accuracy after 1000 total steps: {results2['digits'][EvalMetric.ACCURACY]:.4f}")
+    print(f"PSNR after 1000 total steps: {results2['recon'][EvalMetric.PSNR]:.1f}")
 
     # Accuracy should generally improve (or at least not collapse)
     # Being lenient here — 500 more steps on a tiny model might not always improve
-    assert results2["digits"]["accuracy"] > 0.1, (
+    assert results2["digits"][EvalMetric.ACCURACY] > 0.1, (
         "Accuracy collapsed after more training"
     )
     print("PASS: Additional training completed")
@@ -157,11 +158,11 @@ def main():
     print("\n=== 8. Load checkpoint and verify revert ===")
     ckpts.load(cp1.id, model, trainer)
     results_reverted = trainer.evaluate_all()
-    print(f"Accuracy after revert: {results_reverted['digits']['accuracy']:.4f}")
+    print(f"Accuracy after revert: {results_reverted['digits'][EvalMetric.ACCURACY]:.4f}")
     print(f"Expected ~{accuracy_at_cp1:.4f}")
 
     # Should be close to the accuracy at checkpoint time
-    diff = abs(results_reverted["digits"]["accuracy"] - accuracy_at_cp1)
+    diff = abs(results_reverted["digits"][EvalMetric.ACCURACY] - accuracy_at_cp1)
     assert diff < 0.05, f"Accuracy diff after revert too large: {diff:.4f}"
     print("PASS: Checkpoint load reverts metrics correctly")
 

@@ -26,6 +26,7 @@ from acc.dataset import load_mnist
 from acc.tasks.classification import ClassificationTask
 from acc.tasks.reconstruction import ReconstructionTask
 from acc.tasks.base import TaskError
+from acc.eval_metric import EvalMetric
 from acc.trainer import Trainer
 from acc.jobs import JobManager
 
@@ -167,13 +168,13 @@ def main():
     results = trainer.evaluate_all()
     assert "first_half" in results
     assert "second_half" in results
-    assert "accuracy" in results["first_half"]
-    assert "accuracy" in results["second_half"]
-    print(f"first_half accuracy (z[0:256]): {results['first_half']['accuracy']:.4f}")
+    assert EvalMetric.ACCURACY in results["first_half"]
+    assert EvalMetric.ACCURACY in results["second_half"]
+    print(f"first_half accuracy (z[0:256]): {results['first_half'][EvalMetric.ACCURACY]:.4f}")
     print(
-        f"second_half accuracy (z[256:512]): {results['second_half']['accuracy']:.4f}"
+        f"second_half accuracy (z[256:512]): {results['second_half'][EvalMetric.ACCURACY]:.4f}"
     )
-    print(f"recon PSNR: {results['recon_train']['psnr']:.1f}")
+    print(f"recon PSNR: {results['recon_train'][EvalMetric.PSNR]:.1f}")
     print("PASS: Sliced tasks produce real eval metrics")
 
     print("\n" + "=" * 50)

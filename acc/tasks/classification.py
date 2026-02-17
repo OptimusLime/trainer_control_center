@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from acc.dataset import AccDataset
+from acc.eval_metric import EvalMetric
 from acc.model_output import ModelOutput
 from acc.tasks.base import Task, TaskError
 
@@ -71,4 +72,4 @@ class ClassificationTask(Task):
         self.head.train()
 
         accuracy = correct / total if total > 0 else 0.0
-        return {"accuracy": accuracy}
+        return {EvalMetric.ACCURACY: accuracy}

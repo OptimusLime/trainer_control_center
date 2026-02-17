@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from acc.dataset import AccDataset
+from acc.eval_metric import EvalMetric
 from acc.model_output import ModelOutput
 from acc.tasks.base import Task, TaskError
 
@@ -92,7 +93,7 @@ class KLDivergenceTask(Task):
             model_output = autoencoder(images)
 
             if ModelOutput.MU not in model_output:
-                return {"kl": 0.0}
+                return {EvalMetric.KL: 0.0}
 
             mu = model_output[ModelOutput.MU]
             logvar = model_output[ModelOutput.LOGVAR]
@@ -107,4 +108,4 @@ class KLDivergenceTask(Task):
             n_batches += 1
 
         autoencoder.train()
-        return {"kl": total_kl / max(n_batches, 1)}
+        return {EvalMetric.KL: total_kl / max(n_batches, 1)}

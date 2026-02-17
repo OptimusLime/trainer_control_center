@@ -18,6 +18,8 @@ from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
+from acc.eval_metric import EvalMetric
+
 TRAINER_URL = os.environ.get("ACC_TRAINER_URL", "http://localhost:6060")
 
 
@@ -603,30 +605,40 @@ async def partial_reconstructions(request: Request):
 
 
 async def partial_eval(request: Request):
-    """Per-task eval metrics in a table with color coding."""
+    """Eval metrics with optional checkpoint comparison.
+
+    If comparison data exists in query params (from action_eval_compare),
+    shows a side-by-side table. Otherwise shows single-model eval.
+    """
     health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
             '<div class="panel"><h3>Eval Metrics</h3><div class="empty">No model</div></div>'
         )
 
+    # Run eval on current model (the "base")
     results = await _api("/eval/run", method="POST")
     if not results or "error" in (results if isinstance(results, dict) else {}):
+        # Build checkpoint selector even when no eval yet
+        cp_selector = await _checkpoint_selector_html()
         return HTMLResponse(f"""
         <div class="panel">
             <h3>Eval Metrics</h3>
             <div class="empty">No eval results yet</div>
-            <button class="btn" style="margin-top:8px;"
-                hx-post="/action/eval"
-                hx-target="#eval-panel"
-                hx-swap="innerHTML">Run Eval</button>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                <button class="btn"
+                    hx-post="/action/eval"
+                    hx-target="#eval-panel"
+                    hx-swap="innerHTML">Run Eval</button>
+            </div>
+            {cp_selector}
         </div>
         """)
 
+    # Single-model table (no comparison)
     rows = ""
     for task_name, metrics in results.items():
         for metric_name, value in metrics.items():
-            # Color code based on metric type and value
             css_class = _metric_color(metric_name, value)
             rows += f"""
             <tr>
@@ -635,49 +647,213 @@ async def partial_eval(request: Request):
                 <td class="{css_class}">{value:.4f}</td>
             </tr>"""
 
+    cp_selector = await _checkpoint_selector_html()
+
     return HTMLResponse(f"""
     <div class="panel">
-        <h3>Eval Metrics</h3>
+        <h3>Eval Metrics (Current Model)</h3>
         <table class="eval-table">
             <thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead>
             <tbody>{rows}</tbody>
         </table>
-        <button class="btn" style="margin-top:8px;"
-            hx-post="/action/eval"
-            hx-target="#eval-panel"
-            hx-swap="innerHTML">Run Eval</button>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+            <button class="btn"
+                hx-post="/action/eval"
+                hx-target="#eval-panel"
+                hx-swap="innerHTML">Run Eval</button>
+        </div>
+        {cp_selector}
     </div>
     """)
 
 
+async def _checkpoint_selector_html() -> str:
+    """Build a checkpoint dropdown for comparison eval."""
+    tree = await _api("/checkpoints/tree")
+    if not tree or not tree.get("nodes"):
+        return ""
+
+    current_id = tree.get("current_id")
+    options = '<option value="">-- compare with checkpoint --</option>'
+    for node in tree["nodes"]:
+        nid = node["id"]
+        tag = node["tag"]
+        short = nid[:8]
+        is_current = " (current)" if nid == current_id else ""
+        options += f'<option value="{nid}">{tag} ({short}){is_current}</option>'
+
+    return f"""
+    <div style="margin-top:10px;border-top:1px solid #30363d;padding-top:8px;">
+        <div style="color:#8b949e;font-size:11px;margin-bottom:4px;">Compare with checkpoint:</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+            <select id="eval-compare-cp" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px;">
+                {options}
+            </select>
+            <button class="btn btn-primary btn-sm"
+                hx-post="/action/eval_compare"
+                hx-include="#eval-compare-cp"
+                hx-target="#eval-panel"
+                hx-swap="innerHTML">Compare</button>
+        </div>
+    </div>
+    """
+
+
+async def partial_eval_compare(request: Request):
+    """Run eval on current model AND a comparison checkpoint, show side-by-side table."""
+    form = await request.form()
+    compare_cp_id = str(form.get("eval-compare-cp", ""))
+
+    if not compare_cp_id:
+        return await partial_eval(request)
+
+    health = await _api("/health")
+    if not health or not health.get("has_model"):
+        return HTMLResponse(
+            '<div class="panel"><h3>Eval Metrics</h3><div class="empty">No model</div></div>'
+        )
+
+    # Run eval on current model (base)
+    base_results = await _api("/eval/run", method="POST")
+    if not base_results or "error" in (base_results if isinstance(base_results, dict) else {}):
+        return HTMLResponse(
+            '<div class="panel"><h3>Eval Metrics</h3><div class="error">Base eval failed</div></div>'
+        )
+
+    # Run eval on comparison checkpoint
+    compare_data = await _api("/eval/checkpoint", method="POST", json_data={"checkpoint_id": compare_cp_id})
+    if not compare_data or "error" in (compare_data if isinstance(compare_data, dict) else {}):
+        error_msg = compare_data.get("error", "Unknown error") if isinstance(compare_data, dict) else "Failed"
+        return HTMLResponse(
+            f'<div class="panel"><h3>Eval Metrics</h3><div class="error">Comparison eval failed: {error_msg}</div></div>'
+        )
+
+    compare_tag = compare_data.get("tag", compare_cp_id[:8])
+    compare_metrics = compare_data.get("metrics", {})
+
+    # Build comparison table
+    # Collect all (task, metric) pairs from both
+    all_rows = []
+    all_tasks = set(base_results.keys()) | set(compare_metrics.keys())
+    for task_name in sorted(all_tasks):
+        base_task_metrics = base_results.get(task_name, {})
+        comp_task_metrics = compare_metrics.get(task_name, {})
+        all_metric_names = set(base_task_metrics.keys()) | set(comp_task_metrics.keys())
+        for metric_name in sorted(all_metric_names):
+            base_val = base_task_metrics.get(metric_name)
+            comp_val = comp_task_metrics.get(metric_name)
+            all_rows.append((task_name, metric_name, base_val, comp_val))
+
+    rows_html = ""
+    for task_name, metric_name, base_val, comp_val in all_rows:
+        higher_better = _metric_higher_is_better(metric_name)
+
+        base_str = f"{base_val:.4f}" if base_val is not None else "-"
+        comp_str = f"{comp_val:.4f}" if comp_val is not None else "-"
+
+        # Determine which is best
+        base_bold = ""
+        comp_bold = ""
+        if base_val is not None and comp_val is not None:
+            if higher_better:
+                if base_val >= comp_val:
+                    base_bold = "font-weight:700;color:#7ee787;"
+                else:
+                    comp_bold = "font-weight:700;color:#7ee787;"
+            else:
+                if base_val <= comp_val:
+                    base_bold = "font-weight:700;color:#7ee787;"
+                else:
+                    comp_bold = "font-weight:700;color:#7ee787;"
+
+        rows_html += f"""
+        <tr>
+            <td style="color:#f0f6fc;">{task_name}</td>
+            <td>{metric_name}</td>
+            <td style="{base_bold}">{base_str}</td>
+            <td style="{comp_bold}">{comp_str}</td>
+        </tr>"""
+
+    cp_selector = await _checkpoint_selector_html()
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Eval Comparison: Current vs {compare_tag}</h3>
+        <table class="eval-table">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>Metric</th>
+                    <th style="color:#58a6ff;">Current</th>
+                    <th style="color:#d2a8ff;">{compare_tag}</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+            <button class="btn"
+                hx-post="/action/eval"
+                hx-target="#eval-panel"
+                hx-swap="innerHTML">Run Eval (single)</button>
+        </div>
+        {cp_selector}
+    </div>
+    """)
+
+
+def _resolve_metric(metric_name: str) -> EvalMetric | None:
+    """Resolve a metric name string to an EvalMetric enum, or None if unknown."""
+    try:
+        return EvalMetric(metric_name)
+    except ValueError:
+        return None
+
+
+# Thresholds for color coding: (good_threshold, mid_threshold)
+# For higher-is-better: good if value > good_thresh, mid if > mid_thresh
+# For lower-is-better: good if value < good_thresh, mid if < mid_thresh
+_METRIC_THRESHOLDS: dict[EvalMetric, tuple[float, float]] = {
+    EvalMetric.ACCURACY: (0.9, 0.5),
+    EvalMetric.PSNR: (25.0, 15.0),
+    EvalMetric.L1: (0.05, 0.2),
+    EvalMetric.MAE: (0.05, 0.2),
+    EvalMetric.MSE: (0.05, 0.2),
+    EvalMetric.KL: (5.0, 20.0),
+}
+
+
 def _metric_color(metric_name: str, value: float) -> str:
     """Return CSS class for metric value color coding."""
-    name_lower = metric_name.lower()
-    if "accuracy" in name_lower:
-        if value > 0.9:
+    metric = _resolve_metric(metric_name)
+    if metric is None:
+        return ""
+
+    thresholds = _METRIC_THRESHOLDS.get(metric)
+    if thresholds is None:
+        return ""
+
+    good_thresh, mid_thresh = thresholds
+
+    if metric.higher_is_better:
+        if value > good_thresh:
             return "metric-good"
-        elif value > 0.5:
+        elif value > mid_thresh:
             return "metric-mid"
         return "metric-bad"
-    elif "loss" in name_lower or "mse" in name_lower or "mae" in name_lower or "l1" in name_lower:
-        if value < 0.05:
+    else:
+        if value < good_thresh:
             return "metric-good"
-        elif value < 0.2:
+        elif value < mid_thresh:
             return "metric-mid"
         return "metric-bad"
-    elif "psnr" in name_lower:
-        if value > 25:
-            return "metric-good"
-        elif value > 15:
-            return "metric-mid"
-        return "metric-bad"
-    elif "kl" in name_lower:
-        if value < 5:
-            return "metric-good"
-        elif value < 20:
-            return "metric-mid"
-        return "metric-bad"
-    return ""  # No color for unknown metrics
+
+
+def _metric_higher_is_better(metric_name: str) -> bool:
+    """Determine if higher values are better for this metric."""
+    metric = _resolve_metric(metric_name)
+    if metric is None:
+        return False  # Unknown metrics default to lower-is-better
+    return metric.higher_is_better
 
 
 async def partial_jobs_history(request: Request):
@@ -781,7 +957,7 @@ async def partial_step(request: Request):
 
 
 async def partial_health(request: Request):
-    """Connection health indicator."""
+    """Connection health indicator with device selector."""
     health = await _api("/health")
     connected = health and isinstance(health, dict) and health.get("status") == "ok"
 
@@ -789,9 +965,32 @@ async def partial_health(request: Request):
         device = health.get("device", "?")
         n_tasks = health.get("num_tasks", 0)
         n_datasets = health.get("num_datasets", 0)
+
+        # Fetch available devices for selector
+        device_info = await _api("/device")
+        device_options = ""
+        if device_info and "available" in device_info:
+            for d in device_info["available"]:
+                selected = "selected" if d == device_info.get("current") else ""
+                device_options += f'<option value="{d}" {selected}>{d}</option>'
+
+        device_selector = f"""
+        <select id="device-select" style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:2px 6px;border-radius:3px;font-family:inherit;font-size:11px;"
+            hx-post="/action/set_device"
+            hx-include="this"
+            hx-target="#trainer-status"
+            hx-swap="innerHTML"
+            hx-trigger="change"
+            name="device">
+            {device_options}
+        </select>
+        """ if device_options else ""
+
         return HTMLResponse(
-            f'<span style="color:#7ee787;font-size:11px;">'
-            f"&#9679; {device} | {n_tasks}T {n_datasets}D</span>"
+            f'<span style="display:flex;align-items:center;gap:6px;">'
+            f'<span style="color:#7ee787;font-size:11px;">&#9679; {n_tasks}T {n_datasets}D</span>'
+            f'{device_selector}'
+            f'</span>'
         )
     else:
         return HTMLResponse(
@@ -1125,9 +1324,23 @@ async def action_stop(request: Request):
     """)
 
 
+async def action_set_device(request: Request):
+    """Change the active device via the trainer API."""
+    form = await request.form()
+    device = str(form.get("device", ""))
+    if device:
+        await _api("/device/set", method="POST", json_data={"device": device})
+    return await partial_health(request)
+
+
 async def action_eval(request: Request):
     """Run eval and return the metrics table."""
     return await partial_eval(request)
+
+
+async def action_eval_compare(request: Request):
+    """Run eval comparison between current model and a checkpoint."""
+    return await partial_eval_compare(request)
 
 
 async def action_save_checkpoint(request: Request):
@@ -1379,6 +1592,8 @@ routes = [
     Route("/action/train", action_train, methods=["POST"]),
     Route("/action/stop", action_stop, methods=["POST"]),
     Route("/action/eval", action_eval, methods=["POST"]),
+    Route("/action/eval_compare", action_eval_compare, methods=["POST"]),
+    Route("/action/set_device", action_set_device, methods=["POST"]),
     Route("/action/save_checkpoint", action_save_checkpoint, methods=["POST"]),
     Route("/action/load_checkpoint/{cp_id}", action_load_checkpoint, methods=["POST"]),
     Route("/action/fork_checkpoint/{cp_id}", action_fork_checkpoint, methods=["POST"]),

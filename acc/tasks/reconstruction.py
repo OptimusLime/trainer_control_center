@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from acc.dataset import AccDataset
+from acc.eval_metric import EvalMetric
 from acc.model_output import ModelOutput
 from acc.tasks.base import Task, TaskError
 
@@ -69,4 +70,4 @@ class ReconstructionTask(Task):
         avg_mse = total_mse / max(n_batches, 1)
         psnr = 10 * math.log10(1.0 / max(avg_mse, 1e-10))
 
-        return {"l1": avg_l1, "psnr": psnr}
+        return {EvalMetric.L1: avg_l1, EvalMetric.PSNR: psnr}

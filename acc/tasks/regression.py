@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from acc.dataset import AccDataset
+from acc.eval_metric import EvalMetric
 from acc.model_output import ModelOutput
 from acc.tasks.base import Task, TaskError
 
@@ -102,4 +103,4 @@ class RegressionTask(Task):
 
         mae = total_mae / max(n_samples, 1)
         mse = total_mse / max(n_samples, 1)
-        return {"mae": mae, "mse": mse}
+        return {EvalMetric.MAE: mae, EvalMetric.MSE: mse}

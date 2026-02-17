@@ -30,6 +30,7 @@ from acc.tasks.classification import ClassificationTask
 from acc.tasks.reconstruction import ReconstructionTask
 from acc.tasks.regression import RegressionTask
 from acc.tasks.base import TaskError
+from acc.eval_metric import EvalMetric
 from acc.trainer import Trainer
 from acc.jobs import JobManager
 from acc.checkpoints import CheckpointStore
@@ -231,22 +232,22 @@ def main():
     results = trainer.evaluate_all()
 
     assert "position_probe" in results
-    assert "mae" in results["position_probe"]
-    assert "mse" in results["position_probe"]
+    assert EvalMetric.MAE in results["position_probe"]
+    assert EvalMetric.MSE in results["position_probe"]
 
     assert "scale_probe" in results
-    assert "mae" in results["scale_probe"]
+    assert EvalMetric.MAE in results["scale_probe"]
 
     assert "shape_probe" in results
-    assert "accuracy" in results["shape_probe"]
+    assert EvalMetric.ACCURACY in results["shape_probe"]
 
     assert "recon" in results
-    assert "psnr" in results["recon"]
+    assert EvalMetric.PSNR in results["recon"]
 
-    print(f"Position MAE: {results['position_probe']['mae']:.4f}")
-    print(f"Scale MAE: {results['scale_probe']['mae']:.4f}")
-    print(f"Shape accuracy: {results['shape_probe']['accuracy']:.4f}")
-    print(f"Recon PSNR: {results['recon']['psnr']:.1f}")
+    print(f"Position MAE: {results['position_probe'][EvalMetric.MAE]:.4f}")
+    print(f"Scale MAE: {results['scale_probe'][EvalMetric.MAE]:.4f}")
+    print(f"Shape accuracy: {results['shape_probe'][EvalMetric.ACCURACY]:.4f}")
+    print(f"Recon PSNR: {results['recon'][EvalMetric.PSNR]:.1f}")
     print("PASS: All task types produce real eval metrics")
 
     # ── 10. Checkpoint save ──
@@ -257,20 +258,20 @@ def main():
     print(f"Checkpoint saved: {cp1.tag} ({cp1.id})")
 
     # Save metrics for comparison after revert
-    pos_mae_at_cp1 = results["position_probe"]["mae"]
-    shape_acc_at_cp1 = results["shape_probe"]["accuracy"]
+    pos_mae_at_cp1 = results["position_probe"][EvalMetric.MAE]
+    shape_acc_at_cp1 = results["shape_probe"][EvalMetric.ACCURACY]
 
     # ── 11. Train more and verify metrics change ──
     print("\n=== 11. Train 200 more steps ===")
     job2 = jobs.start(trainer, steps=200, checkpoint_id=cp1.id)
     results2 = trainer.evaluate_all()
     print(
-        f"Position MAE after 400 total steps: {results2['position_probe']['mae']:.4f}"
+        f"Position MAE after 400 total steps: {results2['position_probe'][EvalMetric.MAE]:.4f}"
     )
     print(
-        f"Shape accuracy after 400 total steps: {results2['shape_probe']['accuracy']:.4f}"
+        f"Shape accuracy after 400 total steps: {results2['shape_probe'][EvalMetric.ACCURACY]:.4f}"
     )
-    print(f"Recon PSNR after 400 total steps: {results2['recon']['psnr']:.1f}")
+    print(f"Recon PSNR after 400 total steps: {results2['recon'][EvalMetric.PSNR]:.1f}")
     print("PASS: Additional training completed")
 
     # ── 12. Load checkpoint and verify revert ──
@@ -278,8 +279,8 @@ def main():
     ckpts.load(cp1.id, model, trainer)
     results_reverted = trainer.evaluate_all()
 
-    pos_mae_reverted = results_reverted["position_probe"]["mae"]
-    shape_acc_reverted = results_reverted["shape_probe"]["accuracy"]
+    pos_mae_reverted = results_reverted["position_probe"][EvalMetric.MAE]
+    shape_acc_reverted = results_reverted["shape_probe"][EvalMetric.ACCURACY]
 
     print(f"Position MAE reverted: {pos_mae_reverted:.4f} (was {pos_mae_at_cp1:.4f})")
     print(f"Shape acc reverted: {shape_acc_reverted:.4f} (was {shape_acc_at_cp1:.4f})")

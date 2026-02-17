@@ -28,6 +28,7 @@ from acc.model_output import ModelOutput
 from acc.dataset import AccDataset, load_mnist
 from acc.tasks.base import Task, TaskError
 from acc.tasks.registry import TaskRegistry
+from acc.eval_metric import EvalMetric
 from acc.tasks.reconstruction import ReconstructionTask
 from acc.tasks.classification import ClassificationTask
 from acc.tasks.regression import RegressionTask
@@ -272,7 +273,7 @@ class DummyTestTask(Task):
     assert "kl_digit" in eval_results
     assert "classify" in eval_results
     # Reconstruction should have L1 and PSNR
-    assert "l1" in eval_results["recon"] or "L1" in eval_results["recon"] or len(eval_results["recon"]) > 0
+    assert EvalMetric.L1 in eval_results["recon"] or len(eval_results["recon"]) > 0
     print("PASS: Per-task eval metrics returned")
     passed += 1
 
