@@ -11,8 +11,9 @@
 | M1.95 | Done | Recipes + checkpoint tree + experiment runner (absorbed old M4) |
 | M2 | Done | Hot-reload tasks + dashboard task management |
 | M3 | Done | Generator hot-reload + dataset dashboard |
-| M4 | Next | Multi-GPU training + evaluation |
-| M5 | Planned | UFR evaluation + visual diagnosis dashboard |
+| M4 | Done | Device selection + checkpoint safety (Thin M4) |
+| M5 | Done | UFR evaluation + visual diagnosis dashboard |
+| M5.5 | Next | Loss diagnosis dashboard — health classification, summary stats, persistence |
 | M6 | Planned | Model expansion (layer addition) |
 
 ---
@@ -108,6 +109,32 @@ See `docs/M2_PLAN.md` for full details.
 2. Load curriculum_5k checkpoint → run eval → see traversals
 3. Compare: curriculum_5k thickness traversal is cleaner than mnist_only_5k
 4. UFR score is higher for curriculum_5k than mnist_only_5k
+
+---
+
+## M5.5: Loss Diagnosis Dashboard
+
+**Functionality:** The dashboard screams when something is wrong. Every training step shows health classification (green/yellow/red). Per-task summary statistics (mean, final, trend) are visible during and after training. Loss summaries persist in checkpoints. Job history and checkpoint tree show at-a-glance health indicators.
+
+**Foundation:** `LossHealth` enum and `LossSummary` dataclass in `acc/loss_health.py`. `classify_loss()` and `compute_loss_summary()` are pure library functions reusable for any loss analysis. Checkpoint metrics persistence pattern reusable for any future metadata.
+
+- Real-time health classification on every training step (SSE stream gains `"health"` field)
+- Per-task summary table: mean, final, min, max, trend, health — updates live during training
+- Loss summaries persisted in `Checkpoint.metrics["loss_summary"]`
+- Job history shows colored final losses
+- Checkpoint tree nodes show health indicators
+- **Implements:** `LossHealth`, `LossSummary`, `classify_loss()`, `compute_loss_summary()`
+- **Implements:** `GET /jobs/{job_id}/loss_summary`, `GET /jobs/current/loss_summary`
+
+**Verification:** `python -m acc.test_m5_5`
+
+1. `classify_loss()` returns correct health for known task types and values
+2. `compute_loss_summary()` produces correct stats from a list of step_infos
+3. Training step_info includes "health" field
+4. Checkpoint save persists loss_summary in metrics
+5. Dashboard shows colored loss entries and summary panel
+
+See `docs/M5.5_PLAN.md` for full details.
 
 ---
 

@@ -64,14 +64,31 @@ class TrainerAPI:
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model loaded"}, status_code=404)
             desc = str(self.autoencoder)
+            # Polymorphic layer counting: Autoencoder has .encoder/.decoder,
+            # FactorSlotAutoencoder has .backbone/.decoder_stages
+            model = self.autoencoder
+            num_enc = (
+                len(model.encoder)
+                if hasattr(model, "encoder")
+                else len(model.backbone) // 2  # Conv2d + ResBlock pairs
+                if hasattr(model, "backbone")
+                else 0
+            )
+            num_dec = 0
+            if model.has_decoder:
+                num_dec = (
+                    len(model.decoder)
+                    if hasattr(model, "decoder") and model.decoder is not None
+                    else len(model.decoder_stages)
+                    if hasattr(model, "decoder_stages")
+                    else 0
+                )
             return {
                 "description": desc,
-                "has_decoder": self.autoencoder.has_decoder,
-                "latent_dim": self.autoencoder.latent_dim,
-                "num_encoder_layers": len(self.autoencoder.encoder),
-                "num_decoder_layers": len(self.autoencoder.decoder)
-                if self.autoencoder.has_decoder
-                else 0,
+                "has_decoder": model.has_decoder,
+                "latent_dim": model.latent_dim,
+                "num_encoder_layers": num_enc,
+                "num_decoder_layers": num_dec,
             }
 
         @app.post("/model/create")
@@ -313,8 +330,9 @@ class TrainerAPI:
             if not cp_id:
                 return JSONResponse({"error": "Missing 'checkpoint_id'"}, status_code=400)
 
-            # Save current state to a temp buffer
-            original_state = self.trainer.state_dict()
+            # Save current state to a temp buffer (deep copy to avoid mutation)
+            import copy
+            original_state = copy.deepcopy(self.trainer.state_dict())
 
             try:
                 # Load the target checkpoint
@@ -529,7 +547,10 @@ class TrainerAPI:
         # -- Eval Visualization --
         @app.get("/eval/traversals")
         async def eval_traversals(
-            n_seeds: int = 5, n_steps: int = 9, range_val: float = 3.0
+            n_seeds: int = 5,
+            n_steps: int = 9,
+            range_val: float = 3.0,
+            checkpoint_id: str = "",
         ):
             """Generate latent traversal grids for each factor group.
 
@@ -537,6 +558,9 @@ class TrainerAPI:
               - Encode n_seeds test images -> z
               - Hold other dims fixed, vary this group's dims from -range to +range
               - Decode each -> grid of n_seeds rows x n_steps columns
+
+            Args:
+                checkpoint_id: If provided, temporarily load this checkpoint for eval.
 
             Returns: {"factor_name": [row_of_base64_pngs, ...], ...}
             """
@@ -547,40 +571,54 @@ class TrainerAPI:
                     {"error": "Model has no factor_groups"}, status_code=400
                 )
 
-            # Get test images from first dataset
-            ds = next(iter(self.datasets.values()), None) if self.datasets else None
-            if ds is None:
-                return JSONResponse({"error": "No datasets loaded"}, status_code=400)
+            def _generate_traversals():
+                ds = next(iter(self.datasets.values()), None) if self.datasets else None
+                if ds is None:
+                    return {"error": "No datasets loaded"}
 
-            self.autoencoder.eval()
-            with torch.no_grad():
-                # Get seed images
-                seeds = ds.sample(n_seeds).to(self.device)
-                model_out = self.autoencoder(seeds)
-                z_base = model_out[ModelOutput.MU]  # Use mean, not sampled z
+                self.autoencoder.eval()
+                with torch.no_grad():
+                    seeds = ds.sample(n_seeds).to(self.device)
+                    model_out = self.autoencoder(seeds)
+                    z_base = model_out[ModelOutput.MU]
 
-                result = {}
-                for fg in self.autoencoder.factor_groups:
-                    rows = []
-                    for seed_idx in range(n_seeds):
-                        row_images = []
-                        z_seed = z_base[seed_idx].clone()
-                        for step_i in range(n_steps):
-                            val = -range_val + (2 * range_val) * step_i / (n_steps - 1)
-                            z_mod = z_seed.clone().unsqueeze(0)
-                            z_mod[0, fg.latent_start : fg.latent_end] = val
-                            # Decode: full forward to get reconstruction
-                            # We create a dummy input, encode it, then replace z
-                            # Simpler: just use the decoder path directly
-                            recon = _decode_z(self.autoencoder, z_mod)
-                            row_images.append(_tensor_to_base64(recon[0]))
-                        rows.append(row_images)
-                    result[fg.name] = rows
+                    result = {}
+                    for fg in self.autoencoder.factor_groups:
+                        rows = []
+                        for seed_idx in range(n_seeds):
+                            row_images = []
+                            z_seed = z_base[seed_idx].clone()
+                            # Get the mean activation for this factor group across seeds
+                            # to use as the center of the traversal range
+                            fg_mean = z_base[:, fg.latent_start : fg.latent_end].mean(dim=0)
+                            fg_std = z_base[:, fg.latent_start : fg.latent_end].std(dim=0).clamp(min=0.1)
+                            for step_i in range(n_steps):
+                                # Vary relative to population stats: mean +/- range * std
+                                alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                                z_mod = z_seed.clone().unsqueeze(0)
+                                z_mod[0, fg.latent_start : fg.latent_end] = fg_mean + alpha * fg_std
+                                recon = _decode_z(self.autoencoder, z_mod)
+                                row_images.append(_tensor_to_base64(recon[0]))
+                            rows.append(row_images)
+                        result[fg.name] = rows
 
+                return result
+
+            if checkpoint_id:
+                try:
+                    with self._load_checkpoint_temporarily(checkpoint_id):
+                        result = _generate_traversals()
+                except (FileNotFoundError, RuntimeError) as e:
+                    return JSONResponse({"error": str(e)}, status_code=400)
+            else:
+                result = _generate_traversals()
+
+            if "error" in result:
+                return JSONResponse(result, status_code=400)
             return result
 
         @app.get("/eval/sort_by_factor")
-        async def eval_sort_by_factor(n_show: int = 20):
+        async def eval_sort_by_factor(n_show: int = 20, checkpoint_id: str = ""):
             """Sort test images by mean activation of each factor group.
 
             For each factor group:
@@ -588,6 +626,9 @@ class TrainerAPI:
               - Compute mean of this factor slice
               - Sort by this value
               - Return lowest n_show and highest n_show as base64 PNGs
+
+            Args:
+                checkpoint_id: If provided, temporarily load this checkpoint for eval.
 
             Returns: {"factor_name": {"lowest": [...], "highest": [...]}, ...}
             """
@@ -598,35 +639,126 @@ class TrainerAPI:
                     {"error": "Model has no factor_groups"}, status_code=400
                 )
 
-            ds = next(iter(self.datasets.values()), None) if self.datasets else None
-            if ds is None:
+            def _generate_sort():
+                ds = next(iter(self.datasets.values()), None) if self.datasets else None
+                if ds is None:
+                    return {"error": "No datasets loaded"}
+
+                self.autoencoder.eval()
+                n_encode = min(500, len(ds))
+                images = ds.sample(n_encode).to(self.device)
+
+                with torch.no_grad():
+                    model_out = self.autoencoder(images)
+                    z = model_out[ModelOutput.MU]
+
+                    result = {}
+                    for fg in self.autoencoder.factor_groups:
+                        factor_z = z[:, fg.latent_start : fg.latent_end]
+                        mean_activation = factor_z.mean(dim=1)
+                        sorted_indices = mean_activation.argsort()
+
+                        lowest = [
+                            _tensor_to_base64(images[sorted_indices[i].item()])
+                            for i in range(min(n_show, len(sorted_indices)))
+                        ]
+                        highest = [
+                            _tensor_to_base64(images[sorted_indices[-(i + 1)].item()])
+                            for i in range(min(n_show, len(sorted_indices)))
+                        ]
+                        result[fg.name] = {"lowest": lowest, "highest": highest}
+
+                return result
+
+            if checkpoint_id:
+                try:
+                    with self._load_checkpoint_temporarily(checkpoint_id):
+                        result = _generate_sort()
+                except (FileNotFoundError, RuntimeError) as e:
+                    return JSONResponse({"error": str(e)}, status_code=400)
+            else:
+                result = _generate_sort()
+
+            if "error" in result:
+                return JSONResponse(result, status_code=400)
+            return result
+
+        @app.get("/eval/attention_maps")
+        async def eval_attention_maps(n_images: int = 4, checkpoint_id: str = ""):
+            """Extract per-factor attention heatmaps from cross-attention layers.
+
+            Args:
+                checkpoint_id: If provided, temporarily load this checkpoint for eval.
+
+            Returns:
+                {
+                    "factor_name": [base64_heatmap_overlay, ...],
+                    ...,
+                    "originals": [base64, ...]
+                }
+            """
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model"}, status_code=400)
+            if not hasattr(self.autoencoder, "cross_attn_stages"):
+                return JSONResponse(
+                    {"error": "Model has no cross-attention stages"}, status_code=400
+                )
+
+            from acc.eval.attention import extract_attention_maps
+
+            def _generate_attention():
+                ds = next(iter(self.datasets.values()), None) if self.datasets else None
+                if ds is None:
+                    return {"error": "No datasets loaded"}
+
+                images = ds.sample(n_images).to(self.device)
+                attn_maps = extract_attention_maps(self.autoencoder, images)
+
+                originals = [_tensor_to_base64(images[i]) for i in range(n_images)]
+                result = {"originals": originals}
+                for factor_name, maps in attn_maps.items():
+                    overlays = []
+                    for i in range(n_images):
+                        overlay = _attention_overlay(images[i], maps[i])
+                        overlays.append(_tensor_to_base64(overlay))
+                    result[factor_name] = overlays
+
+                return result
+
+            if checkpoint_id:
+                try:
+                    with self._load_checkpoint_temporarily(checkpoint_id):
+                        result = _generate_attention()
+                except (FileNotFoundError, RuntimeError) as e:
+                    return JSONResponse({"error": str(e)}, status_code=400)
+            else:
+                result = _generate_attention()
+
+            if "error" in result:
+                return JSONResponse(result, status_code=400)
+            return result
+
+        @app.post("/eval/ufr")
+        async def eval_ufr():
+            """Compute UFR disentanglement metrics.
+
+            Returns: {"ufr": float, "disentanglement": float, "completeness": float}
+            """
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model"}, status_code=400)
+            if not hasattr(self.autoencoder, "factor_groups"):
+                return JSONResponse(
+                    {"error": "Model has no factor_groups"}, status_code=400
+                )
+            if not self.datasets:
                 return JSONResponse({"error": "No datasets loaded"}, status_code=400)
 
-            self.autoencoder.eval()
-            n_encode = min(500, len(ds))  # Encode up to 500 images
-            images = ds.sample(n_encode).to(self.device)
+            from acc.eval.ufr import compute_ufr
 
-            with torch.no_grad():
-                model_out = self.autoencoder(images)
-                z = model_out[ModelOutput.MU]
-
-                result = {}
-                for fg in self.autoencoder.factor_groups:
-                    factor_z = z[:, fg.latent_start : fg.latent_end]
-                    mean_activation = factor_z.mean(dim=1)  # (N,)
-                    sorted_indices = mean_activation.argsort()
-
-                    lowest = [
-                        _tensor_to_base64(images[sorted_indices[i].item()])
-                        for i in range(min(n_show, len(sorted_indices)))
-                    ]
-                    highest = [
-                        _tensor_to_base64(images[sorted_indices[-(i + 1)].item()])
-                        for i in range(min(n_show, len(sorted_indices)))
-                    ]
-                    result[fg.name] = {"lowest": lowest, "highest": highest}
-
-            return result
+            results = compute_ufr(
+                self.autoencoder, self.datasets, self.device
+            )
+            return results
 
         # -- Device --
         @app.get("/device")
@@ -723,6 +855,38 @@ class TrainerAPI:
             batch_size=batch_size,
         )
 
+    def _load_checkpoint_temporarily(self, checkpoint_id: str):
+        """Context manager: temporarily load a checkpoint, then restore original state.
+
+        Usage:
+            with self._load_checkpoint_temporarily("abc123"):
+                # self.autoencoder has the checkpoint's weights
+                result = self.autoencoder(images)
+            # original weights are restored
+        """
+        import contextlib
+        import copy
+
+        @contextlib.contextmanager
+        def _ctx():
+            if self.trainer is None or self.autoencoder is None or self.checkpoints is None:
+                raise RuntimeError("No trainer/model/checkpoint store")
+
+            original_state = copy.deepcopy(self.trainer.state_dict())
+            try:
+                self.checkpoints.load(
+                    checkpoint_id, self.autoencoder, self.trainer, device=self.device
+                )
+                yield
+            finally:
+                self.trainer.load_state_dict(original_state)
+                self.autoencoder.to(self.device)
+                for task in self.tasks.values():
+                    if task.head is not None:
+                        task.head.to(self.device)
+
+        return _ctx()
+
     def setup(
         self,
         autoencoder: Autoencoder,
@@ -789,10 +953,46 @@ def _tensor_to_base64(tensor: torch.Tensor) -> str:
 
     img = tensor.cpu().detach()
     if img.shape[0] == 1:
-        img = img.squeeze(0)  # grayscale
+        img = img.squeeze(0)  # grayscale -> (H, W)
+    elif img.shape[0] == 3:
+        img = img.permute(1, 2, 0)  # RGB -> (H, W, 3)
     img_np = (img.numpy() * 255).clip(0, 255).astype(np.uint8)
     pil_img = PIL.Image.fromarray(img_np)
 
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _attention_overlay(
+    image: torch.Tensor, heatmap: torch.Tensor, alpha: float = 0.5
+) -> torch.Tensor:
+    """Overlay a [H, W] attention heatmap on a [C, H, W] image.
+
+    Returns a [3, H, W] RGB tensor with the heatmap blended in.
+    Uses a red-yellow colormap: low attention = transparent, high = red/yellow.
+    """
+    img = image.cpu().detach().float()
+    heat = heatmap.cpu().detach().float()
+
+    # Normalize heatmap to [0, 1]
+    h_min, h_max = heat.min(), heat.max()
+    if h_max > h_min:
+        heat = (heat - h_min) / (h_max - h_min)
+
+    # Convert grayscale to RGB if needed
+    if img.shape[0] == 1:
+        img = img.expand(3, -1, -1)
+
+    # Simple red-yellow colormap: R=1, G=heat, B=0 (low=red, high=yellow)
+    H, W = heat.shape
+    color = torch.zeros(3, H, W)
+    color[0] = 1.0  # R
+    color[1] = heat  # G (0=red, 1=yellow)
+    color[2] = 0.0  # B
+
+    # Blend: where heat is high, show color; where low, show image
+    blend_alpha = heat.unsqueeze(0) * alpha
+    result = img * (1 - blend_alpha) + color * blend_alpha
+
+    return result.clamp(0, 1)

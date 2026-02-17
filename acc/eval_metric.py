@@ -24,6 +24,9 @@ class EvalMetric(str, Enum):
     MAE = "mae"
     MSE = "mse"
     KL = "kl"
+    UFR = "ufr"
+    DISENTANGLEMENT = "disentanglement"
+    COMPLETENESS = "completeness"
 
     @property
     def higher_is_better(self) -> bool:
@@ -37,7 +40,13 @@ class EvalMetric(str, Enum):
 
 
 # Metrics where higher = better. Everything else is lower = better.
-_HIGHER_IS_BETTER = {EvalMetric.ACCURACY, EvalMetric.PSNR}
+_HIGHER_IS_BETTER = {
+    EvalMetric.ACCURACY,
+    EvalMetric.PSNR,
+    EvalMetric.UFR,
+    EvalMetric.DISENTANGLEMENT,
+    EvalMetric.COMPLETENESS,
+}
 
 _DISPLAY_NAMES = {
     EvalMetric.ACCURACY: "Accuracy",
@@ -46,4 +55,7 @@ _DISPLAY_NAMES = {
     EvalMetric.MAE: "MAE",
     EvalMetric.MSE: "MSE",
     EvalMetric.KL: "KL",
+    EvalMetric.UFR: "UFR",
+    EvalMetric.DISENTANGLEMENT: "Disentanglement",
+    EvalMetric.COMPLETENESS: "Completeness",
 }

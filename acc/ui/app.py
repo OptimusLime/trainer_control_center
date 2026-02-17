@@ -117,6 +117,13 @@ def _page(title: str, body: str) -> str:
         .sort-row {{ display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }}
         .sort-label {{ color: #8b949e; font-size: 11px; margin-bottom: 2px; }}
         .sort-row img {{ width: 32px; height: 32px; image-rendering: pixelated; border: 1px solid #21262d; }}
+        .attn-group {{ margin-bottom: 12px; }}
+        .attn-group h4 {{ color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }}
+        .attn-grid {{ display: grid; gap: 4px; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); }}
+        .attn-grid img {{ width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #21262d; }}
+        .attn-pair {{ display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }}
+        .attn-pair img {{ width: 64px; height: 64px; image-rendering: pixelated; border: 1px solid #21262d; }}
+        .attn-pair .attn-label {{ font-size: 9px; color: #8b949e; }}
         .form-group {{ margin-bottom: 8px; }}
         .form-group label {{ display: block; color: #8b949e; font-size: 11px; margin-bottom: 3px; }}
         .form-group select, .form-group input {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 12px; }}
@@ -194,6 +201,9 @@ def _main_placeholder() -> str:
         </div>
         <div id="sort-panel" hx-get="/partial/sort_by_factor" hx-trigger="load">
             <div class="panel"><h3>Sort by Factor</h3><div class="empty">Run eval to generate</div></div>
+        </div>
+        <div id="attention-panel" hx-get="/partial/attention_maps" hx-trigger="load">
+            <div class="panel"><h3>Attention Maps</h3><div class="empty">Run eval to generate</div></div>
         </div>
         <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s">
             <div class="panel"><h3>Datasets</h3><div class="empty">Loading...</div></div>
@@ -515,9 +525,9 @@ async def partial_training(request: Request):
         <h3>Training</h3>
         <div class="training-controls">
             <label>Steps:</label>
-            <input type="number" id="train-steps" value="500" min="1">
+            <input type="number" id="train-steps" name="train-steps" value="500" min="1">
             <label>LR:</label>
-            <input type="text" id="train-lr" value="1e-3">
+            <input type="text" id="train-lr" name="train-lr" value="1e-3">
             <button class="btn btn-primary" id="train-btn"
                 hx-post="/action/train"
                 hx-include="#train-steps, #train-lr"
@@ -686,7 +696,7 @@ async def _checkpoint_selector_html() -> str:
     <div style="margin-top:10px;border-top:1px solid #30363d;padding-top:8px;">
         <div style="color:#8b949e;font-size:11px;margin-bottom:4px;">Compare with checkpoint:</div>
         <div style="display:flex;gap:6px;align-items:center;">
-            <select id="eval-compare-cp" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px;">
+            <select id="eval-compare-cp" name="eval-compare-cp" style="flex:1;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px;">
                 {options}
             </select>
             <button class="btn btn-primary btn-sm"
@@ -1059,7 +1069,7 @@ async def partial_recipe(request: Request):
         """
     else:
         buttons = f"""
-        <select id="recipe-select" class="recipe-select">{options}</select>
+        <select id="recipe-select" name="recipe-select" class="recipe-select">{options}</select>
         <button class="btn btn-primary" style="width:100%;"
             hx-post="/action/recipe_run"
             hx-include="#recipe-select"
@@ -1263,6 +1273,72 @@ async def partial_sort_by_factor(request: Request):
     """)
 
 
+async def partial_attention_maps(request: Request):
+    """Per-factor attention heatmaps overlaid on input images."""
+    health = await _api("/health")
+    if not health or not health.get("has_model"):
+        return HTMLResponse(
+            '<div class="panel"><h3>Attention Maps</h3><div class="empty">No model loaded</div></div>'
+        )
+
+    data = await _api("/eval/attention_maps?n_images=4")
+    if not data or (isinstance(data, dict) and "error" in data):
+        error = data.get("error", "") if isinstance(data, dict) else ""
+        return HTMLResponse(f"""
+        <div class="panel">
+            <h3>Attention Maps</h3>
+            <div class="empty">No attention data. {error}</div>
+            <button class="btn" style="margin-top:8px;"
+                hx-get="/partial/attention_maps"
+                hx-target="#attention-panel"
+                hx-swap="innerHTML">Generate Attention Maps</button>
+        </div>
+        """)
+
+    originals = data.get("originals", [])
+    factor_names = [k for k in data if k != "originals"]
+
+    # Build a row per factor: originals on top, then per-factor heatmaps
+    groups_html = ""
+
+    # Original images row
+    orig_imgs = "".join(
+        f'<div class="attn-pair"><img src="data:image/png;base64,{b64}"><div class="attn-label">input</div></div>'
+        for b64 in originals
+    )
+    groups_html += f"""
+    <div class="attn-group">
+        <h4>Original Images</h4>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">{orig_imgs}</div>
+    </div>
+    """
+
+    # Per-factor rows
+    for factor_name in factor_names:
+        overlays = data[factor_name]
+        factor_imgs = "".join(
+            f'<div class="attn-pair"><img src="data:image/png;base64,{b64}"><div class="attn-label">{factor_name}</div></div>'
+            for b64 in overlays
+        )
+        groups_html += f"""
+        <div class="attn-group">
+            <h4>{factor_name}</h4>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">{factor_imgs}</div>
+        </div>
+        """
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Attention Maps</h3>
+        {groups_html}
+        <button class="btn" style="margin-top:8px;"
+            hx-get="/partial/attention_maps"
+            hx-target="#attention-panel"
+            hx-swap="innerHTML">Refresh Attention Maps</button>
+    </div>
+    """)
+
+
 # ─── Action Endpoints ───
 
 
@@ -1353,7 +1429,7 @@ async def action_save_checkpoint(request: Request):
 async def action_load_checkpoint(request: Request):
     cp_id = request.path_params["cp_id"]
     result = await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
-    if result and isinstance(result, dict) and "error" in result:
+    if result and isinstance(result, dict) and result.get("error"):
         return HTMLResponse(f'<div class="error">{result["error"]}</div>')
     # Refresh all panels — loaded checkpoint changes model weights, affects everything
     return HTMLResponse("""
@@ -1421,7 +1497,7 @@ async def action_add_task(request: Request):
 
     result = await _api("/tasks/add", method="POST", json_data=json_data)
 
-    if result and isinstance(result, dict) and "error" in result:
+    if result and isinstance(result, dict) and result.get("error"):
         error = result["error"]
         return HTMLResponse(
             f'<div class="panel"><h3>+ Task</h3><div class="error">{error}</div></div>'
@@ -1466,7 +1542,7 @@ async def action_generate_dataset(request: Request):
         "params": params,
     })
 
-    if result and isinstance(result, dict) and "error" in result:
+    if result and isinstance(result, dict) and result.get("error"):
         return HTMLResponse(
             f'<div class="panel"><h3>+ Dataset</h3><div class="error">{result["error"]}</div></div>'
         )
@@ -1493,7 +1569,7 @@ async def action_recipe_run(request: Request):
             '<div class="panel"><h3>Recipes</h3><div class="error">No recipe selected</div></div>'
         )
     result = await _api(f"/recipes/{recipe_name}/run", method="POST")
-    if result and isinstance(result, dict) and "error" in result:
+    if result and isinstance(result, dict) and result.get("error"):
         return HTMLResponse(
             f'<div class="panel"><h3>Recipes</h3><div class="error">{result["error"]}</div></div>'
         )
@@ -1587,6 +1663,7 @@ routes = [
     Route("/partial/recipe", partial_recipe),
     Route("/partial/traversals", partial_traversals),
     Route("/partial/sort_by_factor", partial_sort_by_factor),
+    Route("/partial/attention_maps", partial_attention_maps),
     Route("/partial/jobs_history", partial_jobs_history),
     # Actions
     Route("/action/train", action_train, methods=["POST"]),

@@ -54,6 +54,9 @@ class CrossAttentionBlock(nn.Module):
 
     Each spatial position learns which factors are relevant to it.
     This is the mechanism that forces spatial specialization per factor.
+
+    Set `store_attn = True` before a forward pass to capture attention
+    weights in `self.last_attn_weights` (B, heads, HW, N_factors).
     """
 
     def __init__(self, spatial_channels: int, embed_dim: int, num_heads: int = 4):
@@ -75,6 +78,11 @@ class CrossAttentionBlock(nn.Module):
             nn.GELU(),
             nn.Linear(spatial_channels * 4, spatial_channels),
         )
+
+        # Attention capture
+        self.store_attn: bool = False
+        self.last_attn_weights: torch.Tensor | None = None
+        self.last_spatial_shape: tuple[int, int] | None = None
 
     def forward(
         self,
@@ -104,6 +112,11 @@ class CrossAttentionBlock(nn.Module):
 
         attn = (Q @ K.transpose(-2, -1)) / (head_dim**0.5)  # (B, heads, HW, N)
         attn = attn.softmax(dim=-1)
+
+        # Optionally store attention weights for visualization
+        if self.store_attn:
+            self.last_attn_weights = attn.detach()  # (B, heads, HW, N)
+            self.last_spatial_shape = (H, W)
 
         out = attn @ V  # (B, heads, HW, hd)
         out = out.transpose(1, 2).reshape(B, H * W, self.embed_dim)  # (B, HW, D)

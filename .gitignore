@@ -33,6 +33,7 @@ acc/data/
 
 # Checkpoints — training artifacts (not source)
 acc/checkpoints/*.pt
+acc/checkpoints_data/
 test_checkpoints*/
 
 # Jupyter
