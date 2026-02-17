@@ -46,13 +46,32 @@ Any task can target a latent slice via `latent_slice=(start, end)` config. A Cla
 
 ```bash
 # Terminal 1: trainer
-python -m acc.trainer_main
+./run_trainer.sh
 
 # Terminal 2: UI (hot-reloads)
-python -m acc.ui_main
+./run_ui.sh
 ```
 
-Open http://localhost:8080 in a browser.
+Open http://localhost:8080 in a browser. The header shows a green/red connection indicator.
+
+### Split-machine (GPU trainer + laptop UI)
+
+```bash
+# On GPU machine (paul-cheddar):
+./run_trainer.sh
+
+# On laptop:
+./run_ui.sh --remote paul-cheddar
+```
+
+The `--remote <hostname>` flag expands to `--trainer-url http://<hostname>:8787`. Requires Tailscale (or any network where the hostname resolves).
+
+### Manual control
+
+```bash
+python -m acc.trainer_main --port 9787 --host 0.0.0.0
+python -m acc.ui_main --trainer-url http://paul-cheddar:9787 --port 9090
+```
 
 ### Verification tests
 
@@ -69,7 +88,7 @@ python -m acc.test_m1_75   # Factor-slot autoencoder through same pipeline
 | M1 | Done | Full loop: model, tasks, train, eval, checkpoint, dashboard |
 | M1.5 | Done | Model-agnostic forward protocol (`ModelOutput` dict, `latent_slice`) |
 | M1.75 | Done | Factor-Slot autoencoder trains through same pipeline, gradient isolation |
-| M1.9 | Next | Split-machine deployment: trainer on GPU, UI on laptop via Tailscale |
+| M1.9 | Done | Split-machine deployment: trainer on GPU, UI on laptop via Tailscale |
 
 ## Key design decisions
 
@@ -82,7 +101,10 @@ python -m acc.test_m1_75   # Factor-slot autoencoder through same pipeline
 ## Directory structure
 
 ```
+run_trainer.sh                   # Launch script for trainer process
+run_ui.sh                        # Launch script for UI process (--remote flag)
 acc/
+  config.py                    # AccConfig — centralized network configuration
   model_output.py              # ModelOutput enum — the contract
   autoencoder.py               # Simple autoencoder
   factor_group.py              # FactorGroup dataclass
@@ -112,4 +134,5 @@ docs/
   HOW_WE_WORK.md               # Working principles
   WRITING_MILESTONES.md         # Milestone writing guide
   M1.5_M1.75_PLAN.md           # M1.5 + M1.75 plan (completed)
+  M1.9_PLAN.md                 # M1.9 plan (split-machine deployment)
 ```

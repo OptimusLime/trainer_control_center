@@ -89,7 +89,10 @@ def _page(title: str, body: str) -> str:
 <body>
     <div class="header">
         <h1>ACC -- Autoencoder Control Center</h1>
-        <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 2s">[step: -]</span>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <span id="trainer-status" hx-get="/partial/health" hx-trigger="load, every 3s"></span>
+            <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 2s">[step: -]</span>
+        </div>
     </div>
     <div class="layout">
         <div class="sidebar" id="sidebar">
@@ -438,6 +441,24 @@ async def partial_step(request: Request):
     return HTMLResponse("[step: -]")
 
 
+async def partial_health(request: Request):
+    """Connection health indicator — pings trainer /health endpoint."""
+    health = _api("/health")
+    connected = health and isinstance(health, dict) and health.get("status") == "ok"
+
+    if connected:
+        device = health.get("device", "?")
+        return HTMLResponse(
+            f'<span style="color:#7ee787;font-size:11px;">'
+            f"&#9679; {TRAINER_URL} ({device})</span>"
+        )
+    else:
+        return HTMLResponse(
+            f'<span style="color:#f85149;font-size:11px;">'
+            f"&#9679; Disconnected — {TRAINER_URL}</span>"
+        )
+
+
 # ─── Action Endpoints ───
 
 
@@ -589,6 +610,7 @@ routes = [
     Route("/partial/checkpoints", partial_checkpoints),
     Route("/partial/datasets", partial_datasets),
     Route("/partial/step", partial_step),
+    Route("/partial/health", partial_health),
     Route("/action/train", action_train, methods=["POST"]),
     Route("/action/stop", action_stop, methods=["POST"]),
     Route("/action/eval", action_eval, methods=["POST"]),
