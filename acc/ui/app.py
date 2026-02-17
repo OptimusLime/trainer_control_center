@@ -134,7 +134,7 @@ def _page(title: str, body: str) -> str:
 
 def _sidebar_placeholder() -> str:
     return """
-        <div id="recipe-panel" hx-get="/partial/recipe" hx-trigger="load, every 3s">
+        <div id="recipe-panel" hx-get="/partial/recipe" hx-trigger="load">
             <div class="panel"><h3>Recipes</h3><div class="empty">Loading...</div></div>
         </div>
         <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 5s">
@@ -542,8 +542,12 @@ async def partial_recipe(request: Request):
             hx-swap="innerHTML">Run Recipe</button>
         """
 
+    # Self-poll only when a recipe is running (to show progress updates)
+    # When idle, no polling — user can interact with the dropdown without it resetting
+    poll_attr = 'hx-get="/partial/recipe" hx-trigger="every 2s" hx-target="#recipe-panel" hx-swap="innerHTML"' if running else ''
+
     return HTMLResponse(f"""
-    <div class="panel">
+    <div class="panel" {poll_attr}>
         <h3>Recipes</h3>
         {buttons}
         {progress_html}
