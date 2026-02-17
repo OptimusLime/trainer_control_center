@@ -140,6 +140,7 @@ def _page(title: str, body: str) -> str:
     <div class="header">
         <h1>ACC -- Autoencoder Control Center</h1>
         <div style="display:flex;align-items:center;gap:12px;">
+            <span id="checkpoint-indicator" hx-get="/partial/checkpoint_indicator" hx-trigger="load, every 3s" style="font-weight:600;"></span>
             <span id="trainer-status" hx-get="/partial/health" hx-trigger="load, every 3s"></span>
             <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 2s">[step: -]</span>
         </div>
@@ -559,6 +560,26 @@ async def partial_generate(request: Request):
     """)
 
 
+async def partial_checkpoint_indicator(request: Request):
+    """Header badge showing current checkpoint tag + short ID."""
+    tree = await _api("/checkpoints/tree")
+    if not tree or not isinstance(tree, dict):
+        return HTMLResponse('<span style="color:#484f58;">[no checkpoint]</span>')
+    current_id = tree.get("current_id")
+    if not current_id:
+        return HTMLResponse('<span style="color:#484f58;">[no checkpoint]</span>')
+    nodes = tree.get("nodes", [])
+    tag = "unknown"
+    for n in nodes:
+        if n.get("id") == current_id:
+            tag = n.get("tag", "unknown")
+            break
+    short_id = current_id[:8]
+    return HTMLResponse(
+        f'<span style="color:#d2a8ff;background:#1c1430;padding:3px 8px;border-radius:4px;border:1px solid #6e40aa;">CP: {tag} ({short_id})</span>'
+    )
+
+
 async def partial_training(request: Request):
     """Training panel — renders server-side loss summary for the most recent job.
 
@@ -630,43 +651,21 @@ async def partial_training(request: Request):
     else:
         health_banner_html = '<div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>'
 
-    # JS: initialize chart and load data — no setTimeout race
+    # JS: initialize chart and load data — wrapped in requestAnimationFrame
+    # to guarantee the canvas is in the DOM and laid out before Chart.js touches it
     if running and recent_job_id:
-        init_js = f"initChart(); loadLossHistory('{recent_job_id}'); setTimeout(function() {{ startSSE('{recent_job_id}'); }}, 300);"
+        init_js = f"requestAnimationFrame(function() {{ initChart(); loadLossHistory('{recent_job_id}'); setTimeout(function() {{ startSSE('{recent_job_id}'); }}, 300); }});"
     elif recent_job_id:
-        init_js = f"initChart(); loadLossHistory('{recent_job_id}');"
+        init_js = f"requestAnimationFrame(function() {{ initChart(); loadLossHistory('{recent_job_id}'); }});"
     else:
-        init_js = "initChart();"
+        init_js = "requestAnimationFrame(function() { initChart(); });"
+
+    running_indicator = '<span style="color:#f0883e;font-size:11px;"> (training...)</span>' if running else ''
 
     return HTMLResponse(f"""
     <div class="panel">
-        <h3>Training</h3>
+        <h3>Loss Curves{running_indicator}</h3>
         {health_banner_html}
-        <div class="training-controls">
-            <label>Steps:</label>
-            <input type="number" id="train-steps" name="train-steps" value="500" min="1">
-            <label>LR:</label>
-            <input type="text" id="train-lr" name="train-lr" value="1e-3">
-            <button class="btn btn-primary" id="train-btn"
-                hx-post="/action/train"
-                hx-include="#train-steps, #train-lr"
-                hx-target="#training-panel"
-                hx-swap="innerHTML"
-                {"disabled" if running else ""}>Train</button>
-            <button class="btn btn-danger"
-                hx-post="/action/stop"
-                hx-target="#training-panel"
-                hx-swap="innerHTML"
-                {"" if running else "disabled"}>Stop</button>
-            <button class="btn"
-                hx-post="/action/eval"
-                hx-target="#eval-panel"
-                hx-swap="innerHTML">Eval</button>
-            <button class="btn"
-                hx-post="/action/save_checkpoint"
-                hx-target="#checkpoints-panel"
-                hx-swap="innerHTML">Save CP</button>
-        </div>
         <div class="chart-container">
             <canvas id="loss-chart"></canvas>
         </div>
@@ -1829,6 +1828,7 @@ routes = [
     Route("/partial/dataset_samples/{name}", partial_dataset_samples),
     Route("/partial/step", partial_step),
     Route("/partial/health", partial_health),
+    Route("/partial/checkpoint_indicator", partial_checkpoint_indicator),
     Route("/partial/recipe", partial_recipe),
     Route("/partial/traversals", partial_traversals),
     Route("/partial/sort_by_factor", partial_sort_by_factor),
