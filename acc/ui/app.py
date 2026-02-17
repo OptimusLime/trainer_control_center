@@ -85,6 +85,28 @@ def _page(title: str, body: str) -> str:
         .empty {{ color: #484f58; font-style: italic; padding: 8px 0; }}
         .error {{ color: #f85149; padding: 8px; background: #1c0b0b; border: 1px solid #f85149; border-radius: 4px; margin: 8px 0; }}
         #loss-log {{ max-height: 120px; overflow-y: auto; font-size: 11px; color: #8b949e; background: #0d1117; padding: 4px; border-radius: 4px; margin-top: 8px; }}
+        .recipe-select {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 12px; margin-bottom: 8px; }}
+        .recipe-desc {{ color: #8b949e; font-size: 11px; margin-bottom: 8px; }}
+        .phase-indicator {{ background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; margin-top: 8px; }}
+        .phase-current {{ color: #f0883e; font-weight: 600; font-size: 12px; }}
+        .phase-done {{ color: #7ee787; font-size: 11px; }}
+        .phase-item {{ padding: 2px 0; }}
+        .tree-node {{ padding: 4px 0; font-size: 12px; display: flex; align-items: center; gap: 6px; }}
+        .tree-indent {{ display: inline-block; width: 16px; text-align: center; color: #30363d; }}
+        .tree-branch {{ color: #30363d; }}
+        .tree-tag {{ color: #f0f6fc; font-weight: 600; }}
+        .tree-meta {{ color: #8b949e; font-size: 11px; }}
+        .tree-current {{ background: #1c2333; border-radius: 3px; padding: 2px 4px; }}
+        .tree-actions {{ display: flex; gap: 4px; }}
+        .traversal-group {{ margin-bottom: 12px; }}
+        .traversal-group h4 {{ color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }}
+        .traversal-grid {{ display: grid; gap: 2px; }}
+        .traversal-grid img {{ width: 36px; height: 36px; image-rendering: pixelated; border: 1px solid #21262d; }}
+        .sort-group {{ margin-bottom: 12px; }}
+        .sort-group h4 {{ color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }}
+        .sort-row {{ display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }}
+        .sort-label {{ color: #8b949e; font-size: 11px; margin-bottom: 2px; }}
+        .sort-row img {{ width: 32px; height: 32px; image-rendering: pixelated; border: 1px solid #21262d; }}
     </style>
 </head>
 <body>
@@ -112,6 +134,9 @@ def _page(title: str, body: str) -> str:
 
 def _sidebar_placeholder() -> str:
     return """
+        <div id="recipe-panel" hx-get="/partial/recipe" hx-trigger="load, every 3s">
+            <div class="panel"><h3>Recipes</h3><div class="empty">Loading...</div></div>
+        </div>
         <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 5s">
             <div class="panel"><h3>Model</h3><div class="empty">Loading...</div></div>
         </div>
@@ -119,7 +144,7 @@ def _sidebar_placeholder() -> str:
             <div class="panel"><h3>Tasks</h3><div class="empty">Loading...</div></div>
         </div>
         <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 5s">
-            <div class="panel"><h3>Checkpoints</h3><div class="empty">Loading...</div></div>
+            <div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Loading...</div></div>
         </div>
     """
 
@@ -134,6 +159,12 @@ def _main_placeholder() -> str:
         </div>
         <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load, every 5s">
             <div class="panel"><h3>Eval Metrics</h3><div class="empty">Loading...</div></div>
+        </div>
+        <div id="traversal-panel" hx-get="/partial/traversals" hx-trigger="load">
+            <div class="panel"><h3>Latent Traversals</h3><div class="empty">Run eval to generate</div></div>
+        </div>
+        <div id="sort-panel" hx-get="/partial/sort_by_factor" hx-trigger="load">
+            <div class="panel"><h3>Sort by Factor</h3><div class="empty">Run eval to generate</div></div>
         </div>
         <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s">
             <div class="panel"><h3>Dataset Browser</h3><div class="empty">Loading...</div></div>
@@ -386,29 +417,8 @@ async def partial_eval(request: Request):
 
 
 async def partial_checkpoints(request: Request):
-    cps = await _api("/checkpoints")
-    if not cps or (isinstance(cps, dict) and "error" in cps):
-        return HTMLResponse(
-            '<div class="panel"><h3>Checkpoints</h3><div class="empty">No checkpoints</div></div>'
-        )
-
-    if isinstance(cps, list) and len(cps) > 0:
-        items = ""
-        for cp in cps:
-            items += f"""
-            <div class="checkpoint">
-                <span class="tag">{cp["tag"]}</span>
-                <span class="meta"> ({cp["id"][:8]})</span>
-                <button class="btn" style="padding:2px 6px;font-size:10px;"
-                    hx-post="/action/load_checkpoint/{cp["id"]}"
-                    hx-target="#checkpoints-panel"
-                    hx-swap="innerHTML">Load</button>
-            </div>"""
-        return HTMLResponse(f'<div class="panel"><h3>Checkpoints</h3>{items}</div>')
-
-    return HTMLResponse(
-        '<div class="panel"><h3>Checkpoints</h3><div class="empty">No checkpoints saved</div></div>'
-    )
+    """Delegates to checkpoint tree view."""
+    return await partial_checkpoints_tree(request)
 
 
 async def partial_datasets(request: Request):
@@ -458,6 +468,274 @@ async def partial_health(request: Request):
             f'<span style="color:#f85149;font-size:11px;">'
             f"&#9679; Disconnected — {TRAINER_URL}</span>"
         )
+
+
+# ─── Recipe + Tree + Viz Partials ───
+
+
+async def partial_recipe(request: Request):
+    """Recipe picker, run/stop button, and phase progress."""
+    recipes = await _api("/recipes")
+    current = await _api("/recipes/current")
+
+    # Is a recipe running?
+    running = (
+        current
+        and isinstance(current, dict)
+        and current.get("state") == "running"
+    )
+
+    # Recipe options
+    if not recipes or isinstance(recipes, dict):
+        options = '<option value="">No recipes available</option>'
+    else:
+        options = '<option value="">-- select recipe --</option>'
+        for r in recipes:
+            options += f'<option value="{r["name"]}">{r["name"]}</option>'
+
+    # Phase progress display
+    progress_html = ""
+    if current and isinstance(current, dict) and current.get("recipe_name"):
+        state = current.get("state", "unknown")
+        state_class = f"status-{state}"
+        phase = current.get("current_phase", "")
+        phases_done = current.get("phases_completed", [])
+
+        phases_list = ""
+        for p in phases_done:
+            phases_list += f'<div class="phase-item phase-done">&#10003; {p}</div>'
+
+        if state == "running":
+            phases_list += f'<div class="phase-item phase-current">&#9654; {phase}</div>'
+        elif state == "completed":
+            phases_list += f'<div class="phase-item phase-done">&#10003; {phase}</div>'
+        elif state == "failed":
+            error = current.get("error", "Unknown error")
+            phases_list += f'<div class="phase-item" style="color:#f85149;">&#10007; {phase}</div>'
+            phases_list += f'<div style="color:#f85149;font-size:10px;margin-top:4px;">{error[:200]}</div>'
+
+        progress_html = f"""
+        <div class="phase-indicator">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                <span style="color:#f0f6fc;font-size:12px;">{current["recipe_name"]}</span>
+                <span class="{state_class}" style="font-size:11px;">{state}</span>
+            </div>
+            {phases_list}
+        </div>
+        """
+
+    # Run/stop buttons
+    if running:
+        buttons = """
+        <button class="btn btn-danger" style="width:100%;"
+            hx-post="/action/recipe_stop"
+            hx-target="#recipe-panel"
+            hx-swap="innerHTML">Stop Recipe</button>
+        """
+    else:
+        buttons = f"""
+        <select id="recipe-select" class="recipe-select">{options}</select>
+        <button class="btn btn-primary" style="width:100%;"
+            hx-post="/action/recipe_run"
+            hx-include="#recipe-select"
+            hx-target="#recipe-panel"
+            hx-swap="innerHTML">Run Recipe</button>
+        """
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Recipes</h3>
+        {buttons}
+        {progress_html}
+    </div>
+    """)
+
+
+async def partial_checkpoints_tree(request: Request):
+    """Checkpoint tree visualization — replaces flat list."""
+    tree = await _api("/checkpoints/tree")
+    if not tree or isinstance(tree, dict) and "error" in tree:
+        return HTMLResponse(
+            '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">No checkpoints</div></div>'
+        )
+
+    nodes = tree.get("nodes", [])
+    current_id = tree.get("current_id")
+
+    if not nodes:
+        return HTMLResponse(
+            '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">No checkpoints saved</div></div>'
+        )
+
+    # Build tree structure: group children by parent_id
+    children = {}  # parent_id -> [node, ...]
+    roots = []
+    for n in nodes:
+        pid = n.get("parent_id")
+        if pid is None:
+            roots.append(n)
+        else:
+            children.setdefault(pid, []).append(n)
+
+    def render_node(node, depth=0):
+        nid = node["id"]
+        tag = node["tag"]
+        short_id = nid[:8]
+        is_current = nid == current_id
+
+        indent = '<span class="tree-indent">&#9474;</span>' * depth
+        if depth > 0:
+            indent = (
+                '<span class="tree-indent">&#9474;</span>' * (depth - 1)
+                + '<span class="tree-branch">&#9500;&#9472;</span>'
+            )
+
+        current_cls = ' tree-current' if is_current else ''
+        marker = ' &#9679;' if is_current else ''
+
+        html = f"""
+        <div class="tree-node{current_cls}">
+            {indent}
+            <span class="tree-tag">{tag}</span>
+            <span class="tree-meta">({short_id}){marker}</span>
+            <span class="tree-actions">
+                <button class="btn" style="padding:1px 4px;font-size:10px;"
+                    hx-post="/action/load_checkpoint/{nid}"
+                    hx-target="#checkpoints-panel"
+                    hx-swap="innerHTML">Load</button>
+                <button class="btn" style="padding:1px 4px;font-size:10px;"
+                    hx-post="/action/fork_checkpoint/{nid}"
+                    hx-target="#checkpoints-panel"
+                    hx-swap="innerHTML">Fork</button>
+            </span>
+        </div>
+        """
+        for child in children.get(nid, []):
+            html += render_node(child, depth + 1)
+        return html
+
+    tree_html = ""
+    for root in roots:
+        tree_html += render_node(root, 0)
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Checkpoint Tree</h3>
+        {tree_html}
+        <div style="margin-top:8px;">
+            <button class="btn" style="width:100%;"
+                hx-post="/action/save_checkpoint"
+                hx-target="#checkpoints-panel"
+                hx-swap="innerHTML">Save Checkpoint</button>
+        </div>
+    </div>
+    """)
+
+
+async def partial_traversals(request: Request):
+    """Latent traversal grids for each factor group."""
+    health = await _api("/health")
+    if not health or not health.get("has_model"):
+        return HTMLResponse(
+            '<div class="panel"><h3>Latent Traversals</h3><div class="empty">No model loaded</div></div>'
+        )
+
+    data = await _api("/eval/traversals?n_seeds=5&n_steps=9")
+    if not data or (isinstance(data, dict) and "error" in data):
+        error = data.get("error", "") if isinstance(data, dict) else ""
+        return HTMLResponse(f"""
+        <div class="panel">
+            <h3>Latent Traversals</h3>
+            <div class="empty">No traversal data. {error}</div>
+            <button class="btn" style="margin-top:8px;"
+                hx-get="/partial/traversals"
+                hx-target="#traversal-panel"
+                hx-swap="innerHTML">Generate Traversals</button>
+        </div>
+        """)
+
+    groups_html = ""
+    for factor_name, rows in data.items():
+        # Each row is a list of base64 PNGs
+        n_cols = len(rows[0]) if rows else 0
+        grid_items = ""
+        for row in rows:
+            for img_b64 in row:
+                grid_items += f'<img src="data:image/png;base64,{img_b64}">'
+
+        groups_html += f"""
+        <div class="traversal-group">
+            <h4>{factor_name} (dims -3 to +3)</h4>
+            <div class="traversal-grid" style="grid-template-columns: repeat({n_cols}, 36px);">
+                {grid_items}
+            </div>
+        </div>
+        """
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Latent Traversals</h3>
+        {groups_html}
+        <button class="btn" style="margin-top:8px;"
+            hx-get="/partial/traversals"
+            hx-target="#traversal-panel"
+            hx-swap="innerHTML">Refresh Traversals</button>
+    </div>
+    """)
+
+
+async def partial_sort_by_factor(request: Request):
+    """Sort images by factor activation — lowest and highest."""
+    health = await _api("/health")
+    if not health or not health.get("has_model"):
+        return HTMLResponse(
+            '<div class="panel"><h3>Sort by Factor</h3><div class="empty">No model loaded</div></div>'
+        )
+
+    data = await _api("/eval/sort_by_factor?n_show=16")
+    if not data or (isinstance(data, dict) and "error" in data):
+        error = data.get("error", "") if isinstance(data, dict) else ""
+        return HTMLResponse(f"""
+        <div class="panel">
+            <h3>Sort by Factor</h3>
+            <div class="empty">No sort data. {error}</div>
+            <button class="btn" style="margin-top:8px;"
+                hx-get="/partial/sort_by_factor"
+                hx-target="#sort-panel"
+                hx-swap="innerHTML">Generate Sort</button>
+        </div>
+        """)
+
+    groups_html = ""
+    for factor_name, directions in data.items():
+        lowest_imgs = "".join(
+            f'<img src="data:image/png;base64,{b64}">'
+            for b64 in directions.get("lowest", [])
+        )
+        highest_imgs = "".join(
+            f'<img src="data:image/png;base64,{b64}">'
+            for b64 in directions.get("highest", [])
+        )
+        groups_html += f"""
+        <div class="sort-group">
+            <h4>{factor_name}</h4>
+            <div class="sort-label">Lowest activation:</div>
+            <div class="sort-row">{lowest_imgs}</div>
+            <div class="sort-label">Highest activation:</div>
+            <div class="sort-row">{highest_imgs}</div>
+        </div>
+        """
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Sort by Factor</h3>
+        {groups_html}
+        <button class="btn" style="margin-top:8px;"
+            hx-get="/partial/sort_by_factor"
+            hx-target="#sort-panel"
+            hx-swap="innerHTML">Refresh Sort</button>
+    </div>
+    """)
 
 
 # ─── Action Endpoints ───
@@ -562,6 +840,45 @@ async def action_toggle_task(request: Request):
     return resp
 
 
+async def action_recipe_run(request: Request):
+    """Start a recipe by name."""
+    form = await request.form()
+    recipe_name = form.get("recipe-select", "")
+    if not recipe_name:
+        return HTMLResponse(
+            '<div class="panel"><h3>Recipes</h3><div class="error">No recipe selected</div></div>'
+        )
+    result = await _api(f"/recipes/{recipe_name}/run", method="POST")
+    if result and isinstance(result, dict) and "error" in result:
+        return HTMLResponse(
+            f'<div class="panel"><h3>Recipes</h3><div class="error">{result["error"]}</div></div>'
+        )
+    # Return recipe panel that auto-refreshes to show progress
+    return HTMLResponse(
+        '<div hx-get="/partial/recipe" hx-trigger="load" hx-swap="innerHTML"></div>'
+    )
+
+
+async def action_recipe_stop(request: Request):
+    """Stop the running recipe."""
+    await _api("/recipes/stop", method="POST")
+    return HTMLResponse(
+        '<div hx-get="/partial/recipe" hx-trigger="load" hx-swap="innerHTML"></div>'
+    )
+
+
+async def action_fork_checkpoint(request: Request):
+    """Fork a checkpoint, creating a new branch in the tree."""
+    cp_id = request.path_params["cp_id"]
+    result = await _api(
+        "/checkpoints/fork", method="POST",
+        json_data={"id": cp_id, "new_tag": f"fork_{cp_id[:6]}"}
+    )
+    return HTMLResponse(
+        '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
+    )
+
+
 # ─── SSE Proxy ───
 
 
@@ -603,6 +920,7 @@ async def api_jobs_current(request: Request):
 
 routes = [
     Route("/", index),
+    # Partials
     Route("/partial/model", partial_model),
     Route("/partial/tasks", partial_tasks),
     Route("/partial/training", partial_training),
@@ -612,12 +930,20 @@ routes = [
     Route("/partial/datasets", partial_datasets),
     Route("/partial/step", partial_step),
     Route("/partial/health", partial_health),
+    Route("/partial/recipe", partial_recipe),
+    Route("/partial/traversals", partial_traversals),
+    Route("/partial/sort_by_factor", partial_sort_by_factor),
+    # Actions
     Route("/action/train", action_train, methods=["POST"]),
     Route("/action/stop", action_stop, methods=["POST"]),
     Route("/action/eval", action_eval, methods=["POST"]),
     Route("/action/save_checkpoint", action_save_checkpoint, methods=["POST"]),
     Route("/action/load_checkpoint/{cp_id}", action_load_checkpoint, methods=["POST"]),
+    Route("/action/fork_checkpoint/{cp_id}", action_fork_checkpoint, methods=["POST"]),
     Route("/action/toggle_task/{name}", action_toggle_task, methods=["POST"]),
+    Route("/action/recipe_run", action_recipe_run, methods=["POST"]),
+    Route("/action/recipe_stop", action_recipe_stop, methods=["POST"]),
+    # SSE + API proxy
     Route("/sse/job/{job_id}", sse_job),
     Route("/api/jobs/current", api_jobs_current),
 ]

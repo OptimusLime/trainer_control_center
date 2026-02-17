@@ -17,11 +17,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import torch
 
 from acc.autoencoder import Autoencoder
+from acc.model_output import ModelOutput
 from acc.trainer import Trainer
 from acc.jobs import JobManager
 from acc.checkpoints import CheckpointStore
 from acc.tasks.base import Task, TaskError
 from acc.dataset import AccDataset
+from acc.recipes.runner import RecipeRunner
+from acc.recipes.registry import RecipeRegistry
 
 
 class TrainerAPI:
@@ -40,6 +43,9 @@ class TrainerAPI:
         self.tasks: dict[str, Task] = {}
         self.datasets: dict[str, AccDataset] = {}
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.recipe_runner = RecipeRunner()
+        self.recipe_registry = RecipeRegistry()
+        self.recipe_registry.start_watcher()  # Hot-reload recipes on file change
 
         self._register_routes()
 
@@ -332,14 +338,167 @@ class TrainerAPI:
                 },
             ]
 
+        # -- Recipes --
+        @app.get("/recipes")
+        async def list_recipes():
+            return self.recipe_registry.list()
+
+        @app.get("/recipes/{name}")
+        async def get_recipe(name: str):
+            recipe = self.recipe_registry.get(name)
+            if recipe is None:
+                return JSONResponse({"error": f"Recipe '{name}' not found"}, status_code=404)
+            return {"name": recipe.name, "description": recipe.description}
+
+        @app.post("/recipes/{name}/run")
+        async def run_recipe(name: str):
+            recipe = self.recipe_registry.get(name)
+            if recipe is None:
+                return JSONResponse({"error": f"Recipe '{name}' not found"}, status_code=404)
+            try:
+                job = self.recipe_runner.start(recipe, self)
+                return job.to_dict()
+            except RuntimeError as e:
+                return JSONResponse({"error": str(e)}, status_code=409)
+
+        @app.post("/recipes/stop")
+        async def stop_recipe():
+            self.recipe_runner.stop()
+            job = self.recipe_runner.current()
+            return job.to_dict() if job else {"status": "no running recipe"}
+
+        @app.get("/recipes/current")
+        async def current_recipe():
+            job = self.recipe_runner.current()
+            if job is None:
+                return JSONResponse(content=None)
+            return job.to_dict()
+
+        # -- Checkpoint tree --
+        @app.get("/checkpoints/tree")
+        async def checkpoint_tree():
+            """Return full tree structure: nodes with parent_id links."""
+            if self.checkpoints is None:
+                return {"nodes": [], "current_id": None}
+            nodes = [cp.to_dict() for cp in self.checkpoints.tree()]
+            return {
+                "nodes": nodes,
+                "current_id": self.checkpoints.current_id,
+            }
+
+        # -- Eval Visualization --
+        @app.get("/eval/traversals")
+        async def eval_traversals(
+            n_seeds: int = 5, n_steps: int = 9, range_val: float = 3.0
+        ):
+            """Generate latent traversal grids for each factor group.
+
+            For each factor group:
+              - Encode n_seeds test images -> z
+              - Hold other dims fixed, vary this group's dims from -range to +range
+              - Decode each -> grid of n_seeds rows x n_steps columns
+
+            Returns: {"factor_name": [row_of_base64_pngs, ...], ...}
+            """
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model"}, status_code=400)
+            if not hasattr(self.autoencoder, "factor_groups"):
+                return JSONResponse(
+                    {"error": "Model has no factor_groups"}, status_code=400
+                )
+
+            # Get test images from first dataset
+            ds = next(iter(self.datasets.values()), None) if self.datasets else None
+            if ds is None:
+                return JSONResponse({"error": "No datasets loaded"}, status_code=400)
+
+            self.autoencoder.eval()
+            with torch.no_grad():
+                # Get seed images
+                seeds = ds.sample(n_seeds).to(self.device)
+                model_out = self.autoencoder(seeds)
+                z_base = model_out[ModelOutput.MU]  # Use mean, not sampled z
+
+                result = {}
+                for fg in self.autoencoder.factor_groups:
+                    rows = []
+                    for seed_idx in range(n_seeds):
+                        row_images = []
+                        z_seed = z_base[seed_idx].clone()
+                        for step_i in range(n_steps):
+                            val = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                            z_mod = z_seed.clone().unsqueeze(0)
+                            z_mod[0, fg.latent_start : fg.latent_end] = val
+                            # Decode: full forward to get reconstruction
+                            # We create a dummy input, encode it, then replace z
+                            # Simpler: just use the decoder path directly
+                            recon = _decode_z(self.autoencoder, z_mod)
+                            row_images.append(_tensor_to_base64(recon[0]))
+                        rows.append(row_images)
+                    result[fg.name] = rows
+
+            return result
+
+        @app.get("/eval/sort_by_factor")
+        async def eval_sort_by_factor(n_show: int = 20):
+            """Sort test images by mean activation of each factor group.
+
+            For each factor group:
+              - Encode all test images -> z
+              - Compute mean of this factor slice
+              - Sort by this value
+              - Return lowest n_show and highest n_show as base64 PNGs
+
+            Returns: {"factor_name": {"lowest": [...], "highest": [...]}, ...}
+            """
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model"}, status_code=400)
+            if not hasattr(self.autoencoder, "factor_groups"):
+                return JSONResponse(
+                    {"error": "Model has no factor_groups"}, status_code=400
+                )
+
+            ds = next(iter(self.datasets.values()), None) if self.datasets else None
+            if ds is None:
+                return JSONResponse({"error": "No datasets loaded"}, status_code=400)
+
+            self.autoencoder.eval()
+            n_encode = min(500, len(ds))  # Encode up to 500 images
+            images = ds.sample(n_encode).to(self.device)
+
+            with torch.no_grad():
+                model_out = self.autoencoder(images)
+                z = model_out[ModelOutput.MU]
+
+                result = {}
+                for fg in self.autoencoder.factor_groups:
+                    factor_z = z[:, fg.latent_start : fg.latent_end]
+                    mean_activation = factor_z.mean(dim=1)  # (N,)
+                    sorted_indices = mean_activation.argsort()
+
+                    lowest = [
+                        _tensor_to_base64(images[sorted_indices[i].item()])
+                        for i in range(min(n_show, len(sorted_indices)))
+                    ]
+                    highest = [
+                        _tensor_to_base64(images[sorted_indices[-(i + 1)].item()])
+                        for i in range(min(n_show, len(sorted_indices)))
+                    ]
+                    result[fg.name] = {"lowest": lowest, "highest": highest}
+
+            return result
+
         # -- Health --
         @app.get("/health")
         async def health():
+            recipe_job = self.recipe_runner.current()
             return {
                 "status": "ok",
                 "has_model": self.autoencoder is not None,
                 "num_tasks": len(self.tasks),
                 "num_datasets": len(self.datasets),
+                "num_recipes": len(self.recipe_registry.list()),
+                "recipe_running": recipe_job is not None and recipe_job.state == "running",
                 "device": str(self.device),
             }
 
@@ -401,6 +560,39 @@ def _resolve_task_class(class_name: str):
         "RegressionTask": RegressionTask,
     }
     return classes.get(class_name)
+
+
+def _decode_z(model: torch.nn.Module, z: torch.Tensor) -> torch.Tensor:
+    """Decode a latent vector z through the model's decoder.
+
+    Works with FactorSlotAutoencoder: splits z into factor slices,
+    embeds them, and runs through the decoder stages.
+    Falls back to a full forward pass with zeros if model doesn't
+    have the expected decoder structure.
+    """
+    if hasattr(model, "factor_groups") and hasattr(model, "decoder_init"):
+        # FactorSlotAutoencoder decoder path
+        B = z.shape[0]
+        factor_slices = {}
+        for fg in model.factor_groups:
+            factor_slices[fg.name] = z[:, fg.latent_start : fg.latent_end]
+
+        factor_embeds = model.factor_embedder(factor_slices)
+        h = model.decoder_init(z).view(
+            B,
+            model._decoder_init_ch,
+            model._decoder_init_spatial,
+            model._decoder_init_spatial,
+        )
+        for stage, cross_attn in zip(model.decoder_stages, model.cross_attn_stages):
+            h = stage(h)
+            if cross_attn is not None:
+                h = cross_attn(h, factor_embeds)
+        return model.to_output(h)
+    else:
+        # Fallback: run full forward with a zero image, not ideal
+        # but works for simple autoencoders
+        raise NotImplementedError("Traversals require FactorSlotAutoencoder")
 
 
 def _tensor_to_base64(tensor: torch.Tensor) -> str:

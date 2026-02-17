@@ -1,11 +1,11 @@
-"""FactorSlotAutoencoder — cross-attention autoencoder with designated factor groups.
+"""FactorSlotAutoencoder — cross-attention VAE with designated factor groups.
 
 A completely different nn.Module from the simple Autoencoder, but returns the
 same ModelOutput dict. The Trainer doesn't care which model it trains — it just
 calls forward() and passes the dict to tasks.
 
 Architecture:
-    Encoder:  image -> CNN backbone -> per-factor projection heads -> z slices
+    Encoder:  image -> CNN backbone -> per-factor projection heads -> mu/logvar -> z (reparameterized)
     Decoder:  z -> initial spatial -> [upsample + cross-attn(factor embeds)] x N -> image
 """
 
@@ -20,14 +20,17 @@ from acc.layers.cross_attention import FactorEmbedder, CrossAttentionBlock
 
 
 class FactorSlotAutoencoder(nn.Module):
-    """Factor-Slot Cross-Attention Autoencoder.
+    """Factor-Slot Cross-Attention VAE.
+
+    Each factor group has a dedicated FactorHead that outputs mu/logvar
+    and reparameterizes. The KLDivergenceTask reads MU/LOGVAR from the
+    model output dict to compute per-factor or full-latent KL.
 
     Args:
         in_channels: Number of input image channels (1 for grayscale, 3 for RGB).
         factor_groups: List of FactorGroup defining the latent layout.
         backbone_channels: Channel progression for the CNN backbone.
         embed_dim: Shared embedding dimension for cross-attention.
-        decoder_channels: Channel progression for decoder upsample stages.
         image_size: Expected input image size (for computing spatial dims).
     """
 
@@ -35,11 +38,19 @@ class FactorSlotAutoencoder(nn.Module):
         self,
         in_channels: int,
         factor_groups: list[FactorGroup],
-        backbone_channels: list[int] = [64, 128, 256],
+        backbone_channels: list[int] | None = None,
         embed_dim: int = 64,
-        image_size: int = 64,
+        image_size: int = 32,
     ):
         super().__init__()
+
+        # Default backbone: 2 stages for 32x32 (→ 8x8 spatial), 3 for 64x64
+        if backbone_channels is None:
+            if image_size <= 32:
+                backbone_channels = [64, 128]
+            else:
+                backbone_channels = [64, 128, 256]
+
         self.factor_groups = factor_groups
         self.total_latent_dim = sum(fg.latent_dim for fg in factor_groups)
         validate_factor_groups(factor_groups, self.total_latent_dim)
@@ -61,17 +72,17 @@ class FactorSlotAutoencoder(nn.Module):
         self.backbone = nn.Sequential(*backbone_layers)
         self.backbone_out_channels = backbone_channels[-1]
 
-        # --- Per-factor projection heads ---
+        # --- Per-factor projection heads (VAE mode: mu/logvar + reparameterize) ---
         self.factor_heads = nn.ModuleDict(
             {
-                fg.name: FactorHead(self.backbone_out_channels, fg.latent_dim)
+                fg.name: FactorHead(
+                    self.backbone_out_channels, fg.latent_dim, vae=True
+                )
                 for fg in factor_groups
             }
         )
 
         # --- Decoder ---
-        # Initial projection: flat latent -> small spatial
-        # After 3 stride-2 convs on 64x64: spatial is 8x8
         spatial_size = image_size // (2 ** len(backbone_channels))
         self._decoder_init_spatial = spatial_size
         decoder_init_ch = backbone_channels[-1]
@@ -88,8 +99,7 @@ class FactorSlotAutoencoder(nn.Module):
         self.factor_embedder = FactorEmbedder(factor_dims, embed_dim)
 
         # Upsample stages with cross-attention
-        # Each stage: Upsample(2x) -> Conv -> ResBlock -> CrossAttn
-        decoder_channels = list(reversed(backbone_channels))  # mirror the encoder
+        decoder_channels = list(reversed(backbone_channels))
 
         self.decoder_stages = nn.ModuleList()
         self.cross_attn_stages = nn.ModuleList()
@@ -127,22 +137,29 @@ class FactorSlotAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         """Forward pass. Returns ModelOutput dict.
 
-        Always contains: LATENT, SPATIAL, RECONSTRUCTION, FACTOR_SLICES.
+        Always contains: LATENT, SPATIAL, RECONSTRUCTION, FACTOR_SLICES, MU, LOGVAR.
         """
         B = x.shape[0]
 
         # Encode
         spatial = self.backbone(x)  # (B, C, h, w)
 
-        # Per-factor projection
+        # Per-factor projection with reparameterization
         factor_slices = {}
         z_parts = []
+        mu_parts = []
+        logvar_parts = []
+
         for fg in self.factor_groups:
-            z_i = self.factor_heads[fg.name](spatial)
-            factor_slices[fg.name] = z_i
-            z_parts.append(z_i)
+            head_out = self.factor_heads[fg.name](spatial)
+            factor_slices[fg.name] = head_out.z
+            z_parts.append(head_out.z)
+            mu_parts.append(head_out.mu)
+            logvar_parts.append(head_out.logvar)
 
         z = torch.cat(z_parts, dim=1)  # (B, total_latent_dim)
+        mu = torch.cat(mu_parts, dim=1)  # (B, total_latent_dim)
+        logvar = torch.cat(logvar_parts, dim=1)  # (B, total_latent_dim)
 
         # Decode
         factor_embeds = self.factor_embedder(factor_slices)  # (B, N, D)
@@ -166,4 +183,6 @@ class FactorSlotAutoencoder(nn.Module):
             ModelOutput.SPATIAL: spatial,
             ModelOutput.RECONSTRUCTION: reconstruction,
             ModelOutput.FACTOR_SLICES: factor_slices,
+            ModelOutput.MU: mu,
+            ModelOutput.LOGVAR: logvar,
         }

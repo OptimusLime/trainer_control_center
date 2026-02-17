@@ -17,3 +17,5 @@ class ModelOutput(str, Enum):
     )
     SPATIAL = "spatial"  # [B, C, h, w] encoder spatial features before pooling.
     FACTOR_SLICES = "factor_slices"  # dict[str, Tensor] named factor slices. Present if model has factor groups.
+    MU = "mu"  # [B, D] latent mean. Present if model is a VAE.
+    LOGVAR = "logvar"  # [B, D] latent log-variance. Present if model is a VAE.
