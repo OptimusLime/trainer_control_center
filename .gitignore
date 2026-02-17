@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Linters / formatters
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Data — downloaded datasets (re-downloaded on demand)
+acc/data/
+
+# Checkpoints — training artifacts (not source)
+acc/checkpoints/*.pt
+test_checkpoints*/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.log
+*.bak
