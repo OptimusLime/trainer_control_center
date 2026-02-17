@@ -351,11 +351,12 @@ def _chart_js() -> str:
                 eventSource.close();
                 // Load final loss summary for the completed job
                 loadLossSummary(jobId);
-                htmx.trigger('#training-panel', 'refresh');
-                htmx.trigger('#eval-panel', 'refresh');
-                htmx.trigger('#recon-panel', 'refresh');
-                htmx.trigger('#tasks-panel', 'refresh');
-                htmx.trigger('#jobs-panel', 'refresh');
+                // Refresh panels after training completes
+                htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
+                htmx.ajax('GET', '/partial/eval', {target: '#eval-panel', swap: 'innerHTML'});
+                htmx.ajax('GET', '/partial/reconstructions', {target: '#recon-panel', swap: 'innerHTML'});
+                htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});
+                htmx.ajax('GET', '/partial/jobs_history', {target: '#jobs-panel', swap: 'innerHTML'});
                 return;
             }
             addLossPoint(data.step, data.task_name, data.task_loss, data.health || null);
@@ -363,24 +364,8 @@ def _chart_js() -> str:
         };
     }
 
-    // Auto-connect to running job on page load
-    document.addEventListener('DOMContentLoaded', function() {
-        fetch('/api/jobs/current').then(r => r.json()).then(data => {
-            if (data && data.id) {
-                setTimeout(function() {
-                    initChart();
-                    if (data.state === 'running') {
-                        // Load existing history then connect SSE
-                        loadLossHistory(data.id);
-                        setTimeout(function() { startSSE(data.id); }, 300);
-                    } else {
-                        // Job completed — just load its history
-                        loadLossHistory(data.id);
-                    }
-                }, 500);
-            }
-        }).catch(() => {});
-    });
+    // No DOMContentLoaded race — partial_training() renders server-side
+    // and emits the correct JS to initialize the chart and load data.
     """
 
 
@@ -575,13 +560,88 @@ async def partial_generate(request: Request):
 
 
 async def partial_training(request: Request):
+    """Training panel — renders server-side loss summary for the most recent job.
+
+    No 500ms race. No client-side-only data. The server always renders
+    the latest loss summary directly in HTML. JS handles the chart and SSE.
+    """
     job = await _api("/jobs/current")
     running = job and isinstance(job, dict) and job.get("state") == "running"
+
+    # Find the most recent job (running or completed) for loss summary
+    recent_job_id = None
+    summary_html = '<div class="empty">No training data yet</div>'
+    health_banner_html = ""
+
+    if running and job:
+        recent_job_id = job.get("id")
+    else:
+        # Check job history for the most recent completed job
+        history = await _api("/jobs/history?limit=1")
+        if history and isinstance(history, list) and len(history) > 0:
+            recent_job_id = history[0].get("id")
+
+    # Render loss summary table server-side
+    if recent_job_id:
+        summary_data = await _api(f"/jobs/{recent_job_id}/loss_summary")
+        if summary_data and isinstance(summary_data, dict) and "error" not in summary_data:
+            health_colors = {"healthy": "#7ee787", "warning": "#f0883e", "critical": "#f85149"}
+            rows = ""
+            worst_health = "healthy"
+            banner_parts = []
+            for task_name, s in summary_data.items():
+                if not isinstance(s, dict):
+                    continue
+                color = health_colors.get(s.get("health", ""), "#8b949e")
+                trend = s.get("trend", "flat")
+                trend_icon = "&#9660;" if trend == "improving" else "&#9650;" if trend == "worsening" else "&#9644;"
+                trend_color = "#7ee787" if trend == "improving" else "#f85149" if trend == "worsening" else "#8b949e"
+                h = s.get("health", "unknown")
+                if h == "critical":
+                    worst_health = "critical"
+                elif h == "warning" and worst_health != "critical":
+                    worst_health = "warning"
+                rows += f'''<tr>
+                    <td style="color:#f0f6fc;">{task_name}</td>
+                    <td style="color:{color};font-weight:700;">{s.get("final", 0):.4f}</td>
+                    <td>{s.get("mean", 0):.4f}</td>
+                    <td>{s.get("min", 0):.4f}</td>
+                    <td>{s.get("max", 0):.4f}</td>
+                    <td style="color:{trend_color};">{trend_icon} {trend}</td>
+                    <td style="color:{color};font-weight:700;">{h.upper()}</td>
+                </tr>'''
+                banner_parts.append(f'<span style="color:{color};">{task_name}: {s.get("final", 0):.4f}</span>')
+
+            summary_html = f'''<table class="eval-table">
+                <thead><tr><th>Task</th><th>Final</th><th>Mean</th><th>Min</th><th>Max</th><th>Trend</th><th>Health</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>'''
+
+            # Render health banner server-side
+            if worst_health != "healthy":
+                bg = "#3d1114" if worst_health == "critical" else "#3d2e14"
+                border = health_colors.get(worst_health, "#30363d")
+                banner_content = " &nbsp;|&nbsp; ".join(banner_parts)
+                health_banner_html = f'<div id="health-banner" style="padding:6px 10px;border-radius:4px;border:1px solid {border};margin-bottom:8px;font-size:12px;font-weight:600;background:{bg};">{banner_content}</div>'
+            else:
+                health_banner_html = '<div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>'
+        else:
+            health_banner_html = '<div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>'
+    else:
+        health_banner_html = '<div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>'
+
+    # JS: initialize chart and load data — no setTimeout race
+    if running and recent_job_id:
+        init_js = f"initChart(); loadLossHistory('{recent_job_id}'); setTimeout(function() {{ startSSE('{recent_job_id}'); }}, 300);"
+    elif recent_job_id:
+        init_js = f"initChart(); loadLossHistory('{recent_job_id}');"
+    else:
+        init_js = "initChart();"
 
     return HTMLResponse(f"""
     <div class="panel">
         <h3>Training</h3>
-        <div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>
+        {health_banner_html}
         <div class="training-controls">
             <label>Steps:</label>
             <input type="number" id="train-steps" name="train-steps" value="500" min="1">
@@ -614,9 +674,9 @@ async def partial_training(request: Request):
     </div>
     <div class="panel" id="loss-summary-panel">
         <h3>Loss Summary</h3>
-        <div id="loss-summary-content"><div class="empty">Train or click a job to see summary</div></div>
+        <div id="loss-summary-content">{summary_html}</div>
     </div>
-    <script>initChart();</script>
+    <script>{init_js}</script>
     """)
 
 
@@ -1533,12 +1593,13 @@ async def action_load_checkpoint(request: Request):
     return HTMLResponse("""
     <div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>
     <script>
-        htmx.trigger('#model-panel', 'refresh');
-        htmx.trigger('#tasks-panel', 'refresh');
-        htmx.trigger('#recon-panel', 'refresh');
-        htmx.trigger('#eval-panel', 'refresh');
-        htmx.trigger('#traversal-panel', 'refresh');
-        htmx.trigger('#sort-panel', 'refresh');
+        htmx.ajax('GET', '/partial/model', {target: '#model-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/reconstructions', {target: '#recon-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/eval', {target: '#eval-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/traversals', {target: '#traversal-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/sort_by_factor', {target: '#sort-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
     </script>
     """)
 
@@ -1606,7 +1667,7 @@ async def action_add_task(request: Request):
     <div class="panel" hx-get="/partial/add_task" hx-trigger="load" hx-swap="innerHTML">
         <h3>+ Task</h3><div style="color:#7ee787;">Task added!</div>
     </div>
-    <script>htmx.trigger('#tasks-panel', 'refresh');</script>
+    <script>htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});</script>
     """)
 
 
@@ -1653,8 +1714,8 @@ async def action_generate_dataset(request: Request):
         <div style="color:#7ee787;">Generated {ds_name} ({ds_size} images)</div>
     </div>
     <script>
-        htmx.trigger('#datasets-panel', 'refresh');
-        htmx.trigger('#add-task-panel', 'refresh');
+        htmx.ajax('GET', '/partial/datasets', {target: '#datasets-panel', swap: 'innerHTML'});
+        htmx.ajax('GET', '/partial/add_task', {target: '#add-task-panel', swap: 'innerHTML'});
     </script>
     """)
 
