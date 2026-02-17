@@ -104,6 +104,7 @@ class CheckpointStore:
         checkpoint_id: str,
         autoencoder: nn.Module,
         trainer: Trainer,
+        device: Optional[torch.device] = None,
     ) -> Checkpoint:
         """Load a checkpoint from disk and restore model + trainer state.
 
@@ -111,6 +112,7 @@ class CheckpointStore:
             checkpoint_id: The checkpoint ID to load.
             autoencoder: The model to restore into.
             trainer: The trainer to restore into.
+            device: Target device for map_location. If None, uses trainer.device.
 
         Returns:
             The Checkpoint metadata.
@@ -122,8 +124,15 @@ class CheckpointStore:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
 
-        state = torch.load(path, weights_only=False)
+        target_device = device or trainer.device
+        state = torch.load(path, weights_only=False, map_location=target_device)
         trainer.load_state_dict(state["trainer_state"])
+
+        # Ensure model and probe heads are on the target device after load
+        autoencoder.to(target_device)
+        for task in trainer.tasks:
+            if task.head is not None:
+                task.head.to(target_device)
 
         self._current_id = checkpoint_id
         return self._checkpoints.get(

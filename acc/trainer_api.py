@@ -297,6 +297,45 @@ class TrainerAPI:
             results = self.trainer.evaluate_all()
             return results
 
+        @app.post("/eval/checkpoint")
+        async def eval_checkpoint(request: Request):
+            """Run evaluation on a specific checkpoint without changing current state.
+
+            Temporarily loads the checkpoint, runs eval, then restores original state.
+            Body: {"checkpoint_id": "abc123"}
+            Returns: {"checkpoint_id": "abc123", "tag": "...", "metrics": {task: {metric: val}}}
+            """
+            if self.trainer is None or self.autoencoder is None or self.checkpoints is None:
+                return JSONResponse({"error": "No trainer/model/checkpoint store"}, status_code=400)
+
+            data = await request.json()
+            cp_id = data.get("checkpoint_id")
+            if not cp_id:
+                return JSONResponse({"error": "Missing 'checkpoint_id'"}, status_code=400)
+
+            # Save current state to a temp buffer
+            original_state = self.trainer.state_dict()
+
+            try:
+                # Load the target checkpoint
+                cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer, device=self.device)
+                # Run eval
+                results = self.trainer.evaluate_all()
+                return {
+                    "checkpoint_id": cp_id,
+                    "tag": cp.tag,
+                    "metrics": results,
+                }
+            except FileNotFoundError as e:
+                return JSONResponse({"error": str(e)}, status_code=404)
+            finally:
+                # Restore original state
+                self.trainer.load_state_dict(original_state)
+                self.autoencoder.to(self.device)
+                for task in self.tasks.values():
+                    if task.head is not None:
+                        task.head.to(self.device)
+
         @app.post("/eval/reconstructions")
         async def eval_reconstructions(request: Request):
             """Encode + decode N images, return originals and reconstructions side-by-side."""
@@ -357,7 +396,7 @@ class TrainerAPI:
             if not cp_id:
                 return JSONResponse({"error": "Missing checkpoint id"}, status_code=400)
             try:
-                cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer)
+                cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer, device=self.device)
                 return cp.to_dict()
             except FileNotFoundError as e:
                 return JSONResponse({"error": str(e)}, status_code=404)
@@ -588,6 +627,66 @@ class TrainerAPI:
                     result[fg.name] = {"lowest": lowest, "highest": highest}
 
             return result
+
+        # -- Device --
+        @app.get("/device")
+        async def get_device():
+            """Current device and available devices."""
+            available = ["cpu"]
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    available.append(f"cuda:{i}")
+            return {
+                "current": str(self.device),
+                "available": available,
+            }
+
+        @app.post("/device/set")
+        async def set_device(request: Request):
+            """Change the active device. Moves model + probe heads.
+
+            Body: {"device": "cuda:1"}
+            """
+            data = await request.json()
+            device_str = data.get("device")
+            if not device_str:
+                return JSONResponse({"error": "Missing 'device' field"}, status_code=400)
+
+            # Validate device string
+            try:
+                new_device = torch.device(device_str)
+                if new_device.type == "cuda" and not torch.cuda.is_available():
+                    return JSONResponse({"error": "CUDA not available"}, status_code=400)
+                if new_device.type == "cuda" and new_device.index is not None:
+                    if new_device.index >= torch.cuda.device_count():
+                        return JSONResponse(
+                            {"error": f"CUDA device {new_device.index} not found. Have {torch.cuda.device_count()} GPUs."},
+                            status_code=400,
+                        )
+            except Exception as e:
+                return JSONResponse({"error": f"Invalid device: {e}"}, status_code=400)
+
+            old_device = self.device
+            self.device = new_device
+
+            # Move model
+            if self.autoencoder is not None:
+                self.autoencoder.to(new_device)
+
+            # Move probe heads
+            for task in self.tasks.values():
+                if task.head is not None:
+                    task.head.to(new_device)
+
+            # Rebuild trainer with new device
+            if self.trainer is not None:
+                self.trainer.device = new_device
+                self.trainer._build_optimizers()
+
+            return {
+                "previous": str(old_device),
+                "current": str(new_device),
+            }
 
         # -- Health --
         @app.get("/health")

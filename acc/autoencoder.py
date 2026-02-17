@@ -57,7 +57,9 @@ class Autoencoder(nn.Module):
     def _compute_latent_dim(self):
         """Run a dummy forward pass to determine latent_dim."""
         # Guess input shape: try 1-channel 64x64 first, common for our use case
-        dummy = torch.zeros(1, self._guess_in_channels(), 64, 64)
+        # Put dummy tensor on same device as model parameters
+        device = next(self.parameters()).device
+        dummy = torch.zeros(1, self._guess_in_channels(), 64, 64, device=device)
         with torch.no_grad():
             was_training = self.training
             self.eval()

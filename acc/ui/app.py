@@ -1139,10 +1139,21 @@ async def action_save_checkpoint(request: Request):
 
 async def action_load_checkpoint(request: Request):
     cp_id = request.path_params["cp_id"]
-    await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
-    return HTMLResponse(
-        '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
-    )
+    result = await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
+    if result and isinstance(result, dict) and "error" in result:
+        return HTMLResponse(f'<div class="error">{result["error"]}</div>')
+    # Refresh all panels — loaded checkpoint changes model weights, affects everything
+    return HTMLResponse("""
+    <div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>
+    <script>
+        htmx.trigger('#model-panel', 'refresh');
+        htmx.trigger('#tasks-panel', 'refresh');
+        htmx.trigger('#recon-panel', 'refresh');
+        htmx.trigger('#eval-panel', 'refresh');
+        htmx.trigger('#traversal-panel', 'refresh');
+        htmx.trigger('#sort-panel', 'refresh');
+    </script>
+    """)
 
 
 async def action_toggle_task(request: Request):
