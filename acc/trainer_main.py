@@ -1,4 +1,4 @@
-"""Trainer process entry point — starts on :8787.
+"""Trainer process entry point — starts on :6060.
 
 Usage:
     python -m acc.trainer_main

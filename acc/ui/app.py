@@ -1,6 +1,6 @@
-"""UI Dashboard — Starlette + HTMX + SSE on localhost:8080.
+"""UI Dashboard — Starlette + HTMX + SSE on localhost:8081.
 
-Stateless: all state comes from the trainer API (localhost:8787).
+Stateless: all state comes from the trainer API (localhost:6060).
 HTMX for partial page updates. SSE for live training loss streaming.
 """
 
@@ -15,18 +15,19 @@ from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
-TRAINER_URL = os.environ.get("ACC_TRAINER_URL", "http://localhost:8787")
+TRAINER_URL = os.environ.get("ACC_TRAINER_URL", "http://localhost:6060")
 
 
-def _api(path: str, method: str = "GET", json_data: dict = None) -> Optional[dict]:
+async def _api(path: str, method: str = "GET", json_data: dict = None) -> Optional[dict]:
     """Call the trainer API. Returns parsed JSON or None on error."""
     try:
-        if method == "GET":
-            r = httpx.get(f"{TRAINER_URL}{path}", timeout=30.0)
-        else:
-            r = httpx.post(f"{TRAINER_URL}{path}", json=json_data, timeout=30.0)
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient() as client:
+            if method == "GET":
+                r = await client.get(f"{TRAINER_URL}{path}", timeout=10.0)
+            else:
+                r = await client.post(f"{TRAINER_URL}{path}", json=json_data, timeout=30.0)
+            r.raise_for_status()
+            return r.json()
     except Exception as e:
         return {"error": str(e)}
 
@@ -232,7 +233,7 @@ async def index(request: Request):
 
 
 async def partial_model(request: Request):
-    data = _api("/model/describe")
+    data = await _api("/model/describe")
     if data is None or "error" in data:
         return HTMLResponse(
             '<div class="panel"><h3>Model</h3><div class="empty">No model loaded</div></div>'
@@ -250,7 +251,7 @@ async def partial_model(request: Request):
 
 
 async def partial_tasks(request: Request):
-    tasks = _api("/tasks")
+    tasks = await _api("/tasks")
     if not tasks or "error" in (tasks if isinstance(tasks, dict) else {}):
         return HTMLResponse(
             '<div class="panel"><h3>Tasks</h3><div class="empty">No tasks</div></div>'
@@ -281,7 +282,7 @@ async def partial_tasks(request: Request):
 
 
 async def partial_training(request: Request):
-    job = _api("/jobs/current")
+    job = await _api("/jobs/current")
     running = job and isinstance(job, dict) and job.get("state") == "running"
 
     return HTMLResponse(f"""
@@ -322,14 +323,14 @@ async def partial_training(request: Request):
 
 
 async def partial_reconstructions(request: Request):
-    health = _api("/health")
+    health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
             '<div class="panel"><h3>Reconstructions</h3><div class="empty">No model</div></div>'
         )
 
     # Get sample images from first dataset
-    datasets = _api("/datasets")
+    datasets = await _api("/datasets")
     if not datasets or (isinstance(datasets, dict) and "error" in datasets):
         return HTMLResponse(
             '<div class="panel"><h3>Reconstructions</h3><div class="empty">No datasets</div></div>'
@@ -337,7 +338,7 @@ async def partial_reconstructions(request: Request):
 
     if isinstance(datasets, list) and len(datasets) > 0:
         ds_name = datasets[0]["name"]
-        samples = _api(f"/datasets/{ds_name}/sample?n=8")
+        samples = await _api(f"/datasets/{ds_name}/sample?n=8")
         if samples and "images" in samples:
             imgs = "".join(
                 f'<img src="data:image/png;base64,{b64}">' for b64 in samples["images"]
@@ -358,14 +359,14 @@ async def partial_reconstructions(request: Request):
 
 
 async def partial_eval(request: Request):
-    health = _api("/health")
+    health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
             '<div class="panel"><h3>Eval Metrics</h3><div class="empty">No model</div></div>'
         )
 
     # Try to get eval results
-    results = _api("/eval/run", method="POST")
+    results = await _api("/eval/run", method="POST")
     if not results or "error" in (results if isinstance(results, dict) else {}):
         return HTMLResponse(
             '<div class="panel"><h3>Eval Metrics</h3><div class="empty">Run eval to see metrics</div></div>'
@@ -385,7 +386,7 @@ async def partial_eval(request: Request):
 
 
 async def partial_checkpoints(request: Request):
-    cps = _api("/checkpoints")
+    cps = await _api("/checkpoints")
     if not cps or (isinstance(cps, dict) and "error" in cps):
         return HTMLResponse(
             '<div class="panel"><h3>Checkpoints</h3><div class="empty">No checkpoints</div></div>'
@@ -411,7 +412,7 @@ async def partial_checkpoints(request: Request):
 
 
 async def partial_datasets(request: Request):
-    datasets = _api("/datasets")
+    datasets = await _api("/datasets")
     if not datasets or (isinstance(datasets, dict) and "error" in datasets):
         return HTMLResponse(
             '<div class="panel"><h3>Dataset Browser</h3><div class="empty">No datasets</div></div>'
@@ -431,11 +432,11 @@ async def partial_datasets(request: Request):
 
 
 async def partial_step(request: Request):
-    job = _api("/jobs/current")
+    job = await _api("/jobs/current")
     if job and isinstance(job, dict) and "current_step" in job:
         return HTMLResponse(f"[step: {job['current_step']}]")
     # Check last completed job
-    jobs = _api("/jobs")
+    jobs = await _api("/jobs")
     if jobs and isinstance(jobs, list) and len(jobs) > 0:
         return HTMLResponse(f"[step: {jobs[0].get('current_step', '-')}]")
     return HTMLResponse("[step: -]")
@@ -443,7 +444,7 @@ async def partial_step(request: Request):
 
 async def partial_health(request: Request):
     """Connection health indicator — pings trainer /health endpoint."""
-    health = _api("/health")
+    health = await _api("/health")
     connected = health and isinstance(health, dict) and health.get("status") == "ok"
 
     if connected:
@@ -471,7 +472,7 @@ async def action_train(request: Request):
     except ValueError:
         lr_float = 1e-3
 
-    result = _api(
+    result = await _api(
         "/train/start", method="POST", json_data={"steps": steps, "lr": lr_float}
     )
     if result and "id" in result:
@@ -513,7 +514,7 @@ async def action_train(request: Request):
 
 
 async def action_stop(request: Request):
-    _api("/train/stop", method="POST")
+    await _api("/train/stop", method="POST")
     return HTMLResponse("""
     <div class="panel" hx-get="/partial/training" hx-trigger="load">
         <h3>Training</h3><div class="empty">Stopped. Refreshing...</div>
@@ -522,7 +523,7 @@ async def action_stop(request: Request):
 
 
 async def action_eval(request: Request):
-    results = _api("/eval/run", method="POST")
+    results = await _api("/eval/run", method="POST")
     if not results or "error" in (results if isinstance(results, dict) else {}):
         error = results.get("error", "Eval failed") if results else "Failed to connect"
         return HTMLResponse(
@@ -538,7 +539,7 @@ async def action_eval(request: Request):
 
 
 async def action_save_checkpoint(request: Request):
-    result = _api("/checkpoints/save", method="POST", json_data={"tag": "checkpoint"})
+    result = await _api("/checkpoints/save", method="POST", json_data={"tag": "checkpoint"})
     # Re-render checkpoints panel
     return HTMLResponse(
         '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
@@ -547,7 +548,7 @@ async def action_save_checkpoint(request: Request):
 
 async def action_load_checkpoint(request: Request):
     cp_id = request.path_params["cp_id"]
-    result = _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
+    result = await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
     return HTMLResponse(
         '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
     )
@@ -555,7 +556,7 @@ async def action_load_checkpoint(request: Request):
 
 async def action_toggle_task(request: Request):
     task_name = request.path_params["name"]
-    _api(f"/tasks/{task_name}/toggle", method="POST")
+    await _api(f"/tasks/{task_name}/toggle", method="POST")
     # Re-render tasks panel
     resp = await partial_tasks(request)
     return resp
@@ -591,7 +592,7 @@ async def sse_job(request: Request):
 
 async def api_jobs_current(request: Request):
     """Proxy for JS to check current job."""
-    job = _api("/jobs/current")
+    job = await _api("/jobs/current")
     return HTMLResponse(
         json.dumps(job),
         media_type="application/json",

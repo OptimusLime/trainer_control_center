@@ -1,16 +1,18 @@
-"""Trainer HTTP API — JSON endpoints on localhost:8787.
+"""Trainer HTTP API — JSON endpoints on localhost:6060.
 
 Everything the UI can do, you can do via HTTP calls.
 The trainer API is the source of truth.
 """
 
+import asyncio
 import base64
 import io
 import json
 import threading
 from typing import Optional
 
-from flask import Flask, request, jsonify, Response
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import torch
 
@@ -30,7 +32,7 @@ class TrainerAPI:
     """
 
     def __init__(self):
-        self.app = Flask(__name__)
+        self.app = FastAPI(title="ACC Trainer")
         self.autoencoder: Optional[Autoencoder] = None
         self.trainer: Optional[Trainer] = None
         self.jobs = JobManager()
@@ -45,55 +47,48 @@ class TrainerAPI:
         app = self.app
 
         # -- Model --
-        @app.route("/model/describe", methods=["GET"])
-        def model_describe():
+        @app.get("/model/describe")
+        async def model_describe():
             if self.autoencoder is None:
-                return jsonify({"error": "No model loaded"}), 404
+                return JSONResponse({"error": "No model loaded"}, status_code=404)
             desc = str(self.autoencoder)
-            return jsonify(
-                {
-                    "description": desc,
-                    "has_decoder": self.autoencoder.has_decoder,
-                    "latent_dim": self.autoencoder.latent_dim,
-                    "num_encoder_layers": len(self.autoencoder.encoder),
-                    "num_decoder_layers": len(self.autoencoder.decoder)
-                    if self.autoencoder.has_decoder
-                    else 0,
-                }
+            return {
+                "description": desc,
+                "has_decoder": self.autoencoder.has_decoder,
+                "latent_dim": self.autoencoder.latent_dim,
+                "num_encoder_layers": len(self.autoencoder.encoder),
+                "num_decoder_layers": len(self.autoencoder.decoder)
+                if self.autoencoder.has_decoder
+                else 0,
+            }
+
+        @app.post("/model/create")
+        async def model_create():
+            return JSONResponse(
+                {"error": "Model creation via API not yet implemented. Use Python code."},
+                status_code=501,
             )
 
-        @app.route("/model/create", methods=["POST"])
-        def model_create():
-            # For M1: model creation is done from Python code, not via API
-            # This endpoint exists for completeness
-            return jsonify(
-                {
-                    "error": "Model creation via API not yet implemented. Use Python code."
-                }
-            ), 501
-
         # -- Datasets --
-        @app.route("/datasets", methods=["GET"])
-        def list_datasets():
-            return jsonify([ds.describe() for ds in self.datasets.values()])
+        @app.get("/datasets")
+        async def list_datasets():
+            return [ds.describe() for ds in self.datasets.values()]
 
-        @app.route("/datasets/<name>/sample", methods=["GET"])
-        def dataset_sample(name):
+        @app.get("/datasets/{name}/sample")
+        async def dataset_sample(name: str, n: int = 8):
             ds = self.datasets.get(name)
             if ds is None:
-                return jsonify({"error": f"Dataset '{name}' not found"}), 404
-            n = request.args.get("n", 8, type=int)
+                return JSONResponse({"error": f"Dataset '{name}' not found"}, status_code=404)
             samples = ds.sample(n)
-            # Convert to base64 PNG images
             images_b64 = []
             for i in range(samples.shape[0]):
                 img = samples[i]
                 images_b64.append(_tensor_to_base64(img))
-            return jsonify({"images": images_b64})
+            return {"images": images_b64}
 
-        @app.route("/datasets/load_builtin", methods=["POST"])
-        def load_builtin_dataset():
-            data = request.get_json()
+        @app.post("/datasets/load_builtin")
+        async def load_builtin_dataset(request: Request):
+            data = await request.json()
             name = data.get("name", "mnist")
             image_size = data.get("image_size", 64)
             if name == "mnist":
@@ -101,25 +96,24 @@ class TrainerAPI:
 
                 ds = load_mnist(image_size=image_size)
                 self.datasets[ds.name] = ds
-                return jsonify(ds.describe())
-            return jsonify({"error": f"Unknown builtin dataset: {name}"}), 400
+                return ds.describe()
+            return JSONResponse({"error": f"Unknown builtin dataset: {name}"}, status_code=400)
 
         # -- Tasks --
-        @app.route("/tasks", methods=["GET"])
-        def list_tasks():
+        @app.get("/tasks")
+        async def list_tasks():
             result = []
             for task in self.tasks.values():
                 info = task.describe()
-                # Include latest eval metrics if available
                 result.append(info)
-            return jsonify(result)
+            return result
 
-        @app.route("/tasks/add", methods=["POST"])
-        def add_task():
+        @app.post("/tasks/add")
+        async def add_task(request: Request):
             if self.autoencoder is None:
-                return jsonify({"error": "No model loaded"}), 400
+                return JSONResponse({"error": "No model loaded"}, status_code=400)
 
-            data = request.get_json()
+            data = await request.json()
             class_name = data.get("class_name")
             task_name = data.get("name")
             dataset_name = data.get("dataset_name")
@@ -127,170 +121,174 @@ class TrainerAPI:
 
             dataset = self.datasets.get(dataset_name)
             if dataset is None:
-                return jsonify({"error": f"Dataset '{dataset_name}' not found"}), 400
+                return JSONResponse({"error": f"Dataset '{dataset_name}' not found"}, status_code=400)
 
-            # Resolve task class
             task_class = _resolve_task_class(class_name)
             if task_class is None:
-                return jsonify({"error": f"Unknown task class: {class_name}"}), 400
+                return JSONResponse({"error": f"Unknown task class: {class_name}"}, status_code=400)
 
             try:
                 task = task_class(task_name, dataset, weight=weight)
                 task.attach(self.autoencoder)
             except TaskError as e:
-                return jsonify({"error": str(e)}), 400
+                return JSONResponse({"error": str(e)}, status_code=400)
 
             self.tasks[task_name] = task
             self._rebuild_trainer()
-            return jsonify(task.describe())
+            return task.describe()
 
-        @app.route("/tasks/<name>/toggle", methods=["POST"])
-        def toggle_task(name):
+        @app.post("/tasks/{name}/toggle")
+        async def toggle_task(name: str):
             task = self.tasks.get(name)
             if task is None:
-                return jsonify({"error": f"Task '{name}' not found"}), 404
+                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
             task.enabled = not task.enabled
-            return jsonify({"name": name, "enabled": task.enabled})
+            return {"name": name, "enabled": task.enabled}
 
-        @app.route("/tasks/<name>/remove", methods=["POST"])
-        def remove_task(name):
+        @app.post("/tasks/{name}/remove")
+        async def remove_task(name: str):
             task = self.tasks.pop(name, None)
             if task is None:
-                return jsonify({"error": f"Task '{name}' not found"}), 404
+                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
             self._rebuild_trainer()
-            return jsonify({"removed": name})
+            return {"removed": name}
 
         # -- Training / Jobs --
-        @app.route("/train/start", methods=["POST"])
-        def train_start():
+        @app.post("/train/start")
+        async def train_start(request: Request):
             if self.trainer is None:
-                return jsonify(
-                    {"error": "No trainer configured. Add model and tasks first."}
-                ), 400
+                return JSONResponse(
+                    {"error": "No trainer configured. Add model and tasks first."},
+                    status_code=400,
+                )
 
-            data = request.get_json() or {}
+            data = await request.json() if await request.body() else {}
             steps = data.get("steps", 500)
             lr = data.get("lr", self.trainer.lr)
             probe_lr = data.get("probe_lr", self.trainer.probe_lr)
 
-            # Update learning rates if changed
             if lr != self.trainer.lr or probe_lr != self.trainer.probe_lr:
                 self.trainer.lr = lr
                 self.trainer.probe_lr = probe_lr
                 self.trainer._build_optimizers()
 
             job = self.jobs.start(self.trainer, steps=steps, blocking=False)
-            return jsonify(job.to_dict())
+            return job.to_dict()
 
-        @app.route("/train/stop", methods=["POST"])
-        def train_stop():
+        @app.post("/train/stop")
+        async def train_stop():
             if self.trainer is None:
-                return jsonify({"error": "No trainer"}), 400
+                return JSONResponse({"error": "No trainer"}, status_code=400)
             self.trainer.stop()
             job = self.jobs.current()
             if job is not None:
                 job.state = "stopped"
-                return jsonify(job.to_dict())
-            return jsonify({"status": "no running job"})
+                return job.to_dict()
+            return {"status": "no running job"}
 
         # -- Jobs --
-        @app.route("/jobs", methods=["GET"])
-        def list_jobs():
-            return jsonify([j.to_dict() for j in self.jobs.list()])
+        @app.get("/jobs")
+        async def list_jobs():
+            return [j.to_dict() for j in self.jobs.list()]
 
-        @app.route("/jobs/current", methods=["GET"])
-        def current_job():
+        @app.get("/jobs/current")
+        async def current_job():
             job = self.jobs.current()
             if job is None:
-                return jsonify(None)
-            return jsonify(job.to_dict())
+                return JSONResponse(content=None)
+            return job.to_dict()
 
-        @app.route("/jobs/<job_id>", methods=["GET"])
-        def get_job(job_id):
+        @app.get("/jobs/{job_id}")
+        async def get_job(job_id: str):
             job = self.jobs.get(job_id)
             if job is None:
-                return jsonify({"error": f"Job '{job_id}' not found"}), 404
-            return jsonify(job.to_dict())
+                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+            return job.to_dict()
 
-        @app.route("/jobs/<job_id>/stream", methods=["GET"])
-        def stream_job(job_id):
-            from_step = request.args.get("from_step", 0, type=int)
-
-            def generate():
-                for step_data in self.jobs.stream(job_id, from_step=from_step):
-                    yield f"data: {json.dumps(step_data)}\n\n"
+        @app.get("/jobs/{job_id}/stream")
+        async def stream_job(job_id: str, from_step: int = 0):
+            async def generate():
+                # Run the blocking stream() iterator in a thread
+                loop = asyncio.get_event_loop()
+                stream_iter = self.jobs.stream(job_id, from_step=from_step)
+                while True:
+                    try:
+                        step_data = await loop.run_in_executor(
+                            None, lambda: next(stream_iter, None)
+                        )
+                        if step_data is None:
+                            break
+                        yield f"data: {json.dumps(step_data)}\n\n"
+                    except StopIteration:
+                        break
                 yield 'data: {"done": true}\n\n'
 
-            return Response(generate(), mimetype="text/event-stream")
+            return StreamingResponse(generate(), media_type="text/event-stream")
 
         # -- Evaluation --
-        @app.route("/eval/run", methods=["POST"])
-        def run_eval():
+        @app.post("/eval/run")
+        async def run_eval():
             if self.trainer is None:
-                return jsonify({"error": "No trainer"}), 400
+                return JSONResponse({"error": "No trainer"}, status_code=400)
             results = self.trainer.evaluate_all()
-            return jsonify(results)
+            return results
 
         # -- Checkpoints --
-        @app.route("/checkpoints", methods=["GET"])
-        def list_checkpoints():
+        @app.get("/checkpoints")
+        async def list_checkpoints():
             if self.checkpoints is None:
-                return jsonify([])
-            return jsonify([cp.to_dict() for cp in self.checkpoints.tree()])
+                return []
+            return [cp.to_dict() for cp in self.checkpoints.tree()]
 
-        @app.route("/checkpoints/save", methods=["POST"])
-        def save_checkpoint():
+        @app.post("/checkpoints/save")
+        async def save_checkpoint(request: Request):
             if (
                 self.autoencoder is None
                 or self.trainer is None
                 or self.checkpoints is None
             ):
-                return jsonify({"error": "No model/trainer/checkpoint store"}), 400
-            data = request.get_json() or {}
+                return JSONResponse({"error": "No model/trainer/checkpoint store"}, status_code=400)
+            data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
             cp = self.checkpoints.save(self.autoencoder, self.trainer, tag=tag)
-            return jsonify(cp.to_dict())
+            return cp.to_dict()
 
-        @app.route("/checkpoints/load", methods=["POST"])
-        def load_checkpoint():
+        @app.post("/checkpoints/load")
+        async def load_checkpoint(request: Request):
             if (
                 self.autoencoder is None
                 or self.trainer is None
                 or self.checkpoints is None
             ):
-                return jsonify({"error": "No model/trainer/checkpoint store"}), 400
-            data = request.get_json()
+                return JSONResponse({"error": "No model/trainer/checkpoint store"}, status_code=400)
+            data = await request.json()
             cp_id = data.get("id")
             if not cp_id:
-                return jsonify({"error": "Missing checkpoint id"}), 400
+                return JSONResponse({"error": "Missing checkpoint id"}, status_code=400)
             try:
                 cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer)
-                return jsonify(cp.to_dict())
+                return cp.to_dict()
             except FileNotFoundError as e:
-                return jsonify({"error": str(e)}), 404
+                return JSONResponse({"error": str(e)}, status_code=404)
 
-        @app.route("/checkpoints/fork", methods=["POST"])
-        def fork_checkpoint():
+        @app.post("/checkpoints/fork")
+        async def fork_checkpoint(request: Request):
             if self.checkpoints is None:
-                return jsonify({"error": "No checkpoint store"}), 400
-            data = request.get_json()
+                return JSONResponse({"error": "No checkpoint store"}, status_code=400)
+            data = await request.json()
             cp_id = data.get("id")
             new_tag = data.get("new_tag", "fork")
             try:
                 cp = self.checkpoints.fork(cp_id, new_tag)
-                return jsonify(cp.to_dict())
+                return cp.to_dict()
             except KeyError as e:
-                return jsonify({"error": str(e)}), 404
+                return JSONResponse({"error": str(e)}, status_code=404)
 
         # -- Registry (what's available) --
-        @app.route("/registry/tasks", methods=["GET"])
-        def registry_tasks():
+        @app.get("/registry/tasks")
+        async def registry_tasks():
             """List available task classes."""
-            from acc.tasks.classification import ClassificationTask
-            from acc.tasks.reconstruction import ReconstructionTask
-            from acc.tasks.regression import RegressionTask
-
-            classes = [
+            return [
                 {
                     "class_name": "ClassificationTask",
                     "description": "Linear probe classification with cross-entropy loss",
@@ -304,51 +302,46 @@ class TrainerAPI:
                     "description": "Linear probe regression with MSE loss, MAE eval",
                 },
             ]
-            return jsonify(classes)
 
-        @app.route("/registry/layers", methods=["GET"])
-        def registry_layers():
-            return jsonify(
-                [
-                    {
-                        "class_name": "ConvBlock",
-                        "description": "Conv2d + BatchNorm + ReLU",
-                    },
-                    {
-                        "class_name": "ConvTransposeBlock",
-                        "description": "ConvTranspose2d + BatchNorm + ReLU",
-                    },
-                    {
-                        "class_name": "ResBlock",
-                        "description": "GroupNorm + SiLU + Conv residual block",
-                    },
-                    {
-                        "class_name": "FactorHead",
-                        "description": "AdaptivePool + Linear projection for factor slice",
-                    },
-                    {
-                        "class_name": "CrossAttentionBlock",
-                        "description": "Spatial cross-attention to factor embeddings",
-                    },
-                    {
-                        "class_name": "FactorEmbedder",
-                        "description": "Per-factor MLP projection to shared embed space",
-                    },
-                ]
-            )
+        @app.get("/registry/layers")
+        async def registry_layers():
+            return [
+                {
+                    "class_name": "ConvBlock",
+                    "description": "Conv2d + BatchNorm + ReLU",
+                },
+                {
+                    "class_name": "ConvTransposeBlock",
+                    "description": "ConvTranspose2d + BatchNorm + ReLU",
+                },
+                {
+                    "class_name": "ResBlock",
+                    "description": "GroupNorm + SiLU + Conv residual block",
+                },
+                {
+                    "class_name": "FactorHead",
+                    "description": "AdaptivePool + Linear projection for factor slice",
+                },
+                {
+                    "class_name": "CrossAttentionBlock",
+                    "description": "Spatial cross-attention to factor embeddings",
+                },
+                {
+                    "class_name": "FactorEmbedder",
+                    "description": "Per-factor MLP projection to shared embed space",
+                },
+            ]
 
         # -- Health --
-        @app.route("/health", methods=["GET"])
-        def health():
-            return jsonify(
-                {
-                    "status": "ok",
-                    "has_model": self.autoencoder is not None,
-                    "num_tasks": len(self.tasks),
-                    "num_datasets": len(self.datasets),
-                    "device": str(self.device),
-                }
-            )
+        @app.get("/health")
+        async def health():
+            return {
+                "status": "ok",
+                "has_model": self.autoencoder is not None,
+                "num_tasks": len(self.tasks),
+                "num_datasets": len(self.datasets),
+                "device": str(self.device),
+            }
 
     def _rebuild_trainer(self):
         """Rebuild the Trainer when tasks change."""
@@ -390,9 +383,10 @@ class TrainerAPI:
             self.device,
         )
 
-    def run(self, host: str = "0.0.0.0", port: int = 8787):
+    def run(self, host: str = "0.0.0.0", port: int = 6060):
         """Start the HTTP server."""
-        self.app.run(host=host, port=port, threaded=True)
+        import uvicorn
+        uvicorn.run(self.app, host=host, port=port)
 
 
 def _resolve_task_class(class_name: str):

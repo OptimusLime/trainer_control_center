@@ -8,20 +8,20 @@ An interactive training workbench for variational autoencoders with human-in-the
 
 ```
                     +-----------------+
-  Browser -------->|  UI Process     |  :8080  (Starlette + HTMX + SSE)
+  Browser -------->|  UI Process     |  :8081  (Starlette + HTMX + SSE)
                     |  Hot-reloads    |  Stateless — all state from trainer API
                     +--------+--------+
                              |
                              | HTTP / SSE
                              v
                     +-----------------+
-                    | Trainer Process  |  :8787  (Flask JSON API)
+                    | Trainer Process  |  :6060  (Flask JSON API)
                     | Never restarts   |  Owns: model, tasks, optimizer, checkpoints
                     +-----------------+
 ```
 
-- **Trainer process** (:8787) — owns the model, tasks, datasets, optimizer, checkpoint store. Exposes a JSON API. Never restarts during a session.
-- **UI process** (:8080) — Starlette + HTMX dashboard. Stateless proxy to the trainer API. Hot-reloads freely via `uvicorn --reload`.
+- **Trainer process** (:6060) — owns the model, tasks, datasets, optimizer, checkpoint store. Exposes a JSON API. Never restarts during a session.
+- **UI process** (:8081) — Starlette + HTMX dashboard. Stateless proxy to the trainer API. Hot-reloads freely via `uvicorn --reload`.
 
 ## What's in here
 
@@ -52,7 +52,7 @@ Any task can target a latent slice via `latent_slice=(start, end)` config. A Cla
 ./run_ui.sh
 ```
 
-Open http://localhost:8080 in a browser. The header shows a green/red connection indicator.
+Open http://localhost:8081 in a browser. The header shows a green/red connection indicator.
 
 ### Split-machine (GPU trainer + laptop UI)
 
@@ -64,7 +64,7 @@ Open http://localhost:8080 in a browser. The header shows a green/red connection
 ./run_ui.sh --remote paul-cheddar
 ```
 
-The `--remote <hostname>` flag expands to `--trainer-url http://<hostname>:8787`. Requires Tailscale (or any network where the hostname resolves).
+The `--remote <hostname>` flag expands to `--trainer-url http://<hostname>:6060`. Requires Tailscale (or any network where the hostname resolves).
 
 ### Manual control
 

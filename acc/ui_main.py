@@ -1,8 +1,8 @@
-"""UI process entry point — starts dashboard on :8080.
+"""UI process entry point — starts dashboard on :8081.
 
 Usage:
     python -m acc.ui_main
-    python -m acc.ui_main --trainer-url http://paul-cheddar:8787
+    python -m acc.ui_main --trainer-url http://paul-cheddar:6060
     python -m acc.ui_main --port 9090
 
 Hot-reloads freely via uvicorn --reload.
@@ -25,7 +25,7 @@ def main():
         "--trainer-url",
         type=str,
         default=None,
-        help="Trainer API URL (e.g. http://paul-cheddar:8787)",
+        help="Trainer API URL (e.g. http://paul-cheddar:6060)",
     )
     parser.add_argument("--reload", action="store_true", default=True)
     parser.add_argument("--no-reload", action="store_true", default=False)

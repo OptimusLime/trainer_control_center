@@ -2,7 +2,7 @@
 # Start the ACC trainer process.
 #
 # Usage:
-#   ./run_trainer.sh              # default port 8787
+#   ./run_trainer.sh              # default port 6060
 #   ./run_trainer.sh --port 9787  # custom port
 #
 # The trainer binds to 0.0.0.0, so it's accessible from any machine

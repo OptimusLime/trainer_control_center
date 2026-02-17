@@ -17,9 +17,9 @@ class AccConfig:
 
     Env vars:
         ACC_TRAINER_HOST: Trainer bind host (default: 0.0.0.0)
-        ACC_TRAINER_PORT: Trainer bind port (default: 8787)
+        ACC_TRAINER_PORT: Trainer bind port (default: 6060)
         ACC_UI_HOST: UI bind host (default: 0.0.0.0)
-        ACC_UI_PORT: UI bind port (default: 8080)
+        ACC_UI_PORT: UI bind port (default: 8081)
         ACC_TRAINER_URL: Full trainer URL for UI to connect to (default: computed)
     """
 
@@ -27,13 +27,13 @@ class AccConfig:
         default_factory=lambda: os.environ.get("ACC_TRAINER_HOST", "0.0.0.0")
     )
     trainer_port: int = field(
-        default_factory=lambda: int(os.environ.get("ACC_TRAINER_PORT", "8787"))
+        default_factory=lambda: int(os.environ.get("ACC_TRAINER_PORT", "6060"))
     )
     ui_host: str = field(
         default_factory=lambda: os.environ.get("ACC_UI_HOST", "0.0.0.0")
     )
     ui_port: int = field(
-        default_factory=lambda: int(os.environ.get("ACC_UI_PORT", "8080"))
+        default_factory=lambda: int(os.environ.get("ACC_UI_PORT", "8081"))
     )
     # Explicit trainer URL for the UI to connect to. If set, overrides computed URL.
     trainer_url: str = field(
