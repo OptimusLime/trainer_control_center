@@ -6,6 +6,7 @@ Task losses round-robin: each step samples from the next enabled task's dataload
 
 from typing import Callable, Optional
 import itertools
+import time
 
 import torch
 import torch.nn as nn
@@ -157,6 +158,11 @@ class Trainer:
 
             if on_step is not None:
                 on_step(step_info)
+
+            # Yield the GIL briefly so the FastAPI event loop can process
+            # pending HTTP requests (health checks, SSE, etc.).
+            if step % 5 == 0:
+                time.sleep(0)
 
         return loss_history
 

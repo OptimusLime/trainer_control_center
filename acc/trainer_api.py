@@ -293,12 +293,43 @@ class TrainerAPI:
             return job.to_dict()
 
         @app.get("/jobs/{job_id}/loss_history")
-        async def job_loss_history(job_id: str):
-            """Full loss history for a job — used to populate charts on page load."""
+        async def job_loss_history(job_id: str, max_points: int = 200):
+            """Loss history for a job, downsampled per task for chart display.
+
+            Returns at most `max_points` entries per task name.  Always keeps
+            the first and last entry for each task so the chart spans the full
+            step range.  For live jobs the tail is the most important part so
+            we sample uniformly across what we have.
+            """
             job = self.jobs.get(job_id)
             if job is None:
                 return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
-            return job.losses
+
+            losses = job.losses
+            if len(losses) <= max_points:
+                return losses
+
+            # Group by task_name, downsample each, merge back in step order
+            from collections import defaultdict
+            by_task: dict[str, list[dict]] = defaultdict(list)
+            for entry in losses:
+                by_task[entry.get("task_name", "?")].append(entry)
+
+            result = []
+            for task_entries in by_task.values():
+                n = len(task_entries)
+                if n <= max_points:
+                    result.extend(task_entries)
+                else:
+                    # Always keep first and last; sample evenly in between
+                    step = max(1, n // max_points)
+                    sampled = task_entries[::step]
+                    if task_entries[-1] not in sampled:
+                        sampled.append(task_entries[-1])
+                    result.extend(sampled)
+
+            result.sort(key=lambda e: e.get("step", 0))
+            return result
 
         @app.get("/jobs/current/loss_summary")
         async def current_job_loss_summary():

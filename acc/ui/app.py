@@ -342,8 +342,8 @@ def _chart_js() -> str:
 
     function startSSE(jobId) {
         if (eventSource) { eventSource.close(); }
-        lossData = {};
-        if (lossChart) { lossChart.data.datasets = []; lossChart.update(); }
+        // Do NOT wipe lossData here — loadLossHistory may have already populated it.
+        // SSE picks up from lastStep, so existing data is kept and new points are appended.
 
         eventSource = new EventSource('/sse/job/' + jobId + '?from_step=' + lastStep);
         eventSource.onmessage = function(e) {
@@ -662,6 +662,25 @@ async def partial_training(request: Request):
 
     running_indicator = '<span style="color:#f0883e;font-size:11px;"> (training...)</span>' if running else ''
 
+    # When NOT running, poll every 3s to detect new jobs (JS-based polling).
+    # When running, SSE handles live updates; no polling needed.
+    # SSE 'done' handler refreshes the panel, which restarts the poll cycle.
+    if not running:
+        poll_js = """
+        (function() {
+            var pollTimer = setInterval(function() {
+                fetch('/api/jobs/current').then(function(r) { return r.json(); }).then(function(job) {
+                    if (job && job.state === 'running') {
+                        clearInterval(pollTimer);
+                        htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
+                    }
+                }).catch(function() {});
+            }, 2000);
+        })();
+        """
+    else:
+        poll_js = ""
+
     return HTMLResponse(f"""
     <div class="panel">
         <h3>Loss Curves{running_indicator}</h3>
@@ -675,7 +694,7 @@ async def partial_training(request: Request):
         <h3>Loss Summary</h3>
         <div id="loss-summary-content">{summary_html}</div>
     </div>
-    <script>{init_js}</script>
+    <script>{init_js}{poll_js}</script>
     """)
 
 
@@ -1509,23 +1528,8 @@ async def action_train(request: Request):
     if result and "id" in result:
         return HTMLResponse(f"""
         <div class="panel">
-            <h3>Training</h3>
+            <h3>Loss Curves <span style="color:#f0883e;font-size:11px;">(training...)</span></h3>
             <div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>
-            <div class="training-controls">
-                <label>Steps:</label>
-                <input type="number" id="train-steps" value="{steps}" min="1">
-                <label>LR:</label>
-                <input type="text" id="train-lr" value="{lr}">
-                <button class="btn btn-primary" disabled>Training...</button>
-                <button class="btn btn-danger"
-                    hx-post="/action/stop"
-                    hx-target="#training-panel"
-                    hx-swap="innerHTML">Stop</button>
-                <button class="btn"
-                    hx-post="/action/save_checkpoint"
-                    hx-target="#checkpoints-panel"
-                    hx-swap="innerHTML">Save CP</button>
-            </div>
             <div class="chart-container">
                 <canvas id="loss-chart"></canvas>
             </div>
@@ -1535,7 +1539,7 @@ async def action_train(request: Request):
             <h3>Loss Summary</h3>
             <div id="loss-summary-content"><div class="empty">Training in progress...</div></div>
         </div>
-        <script>initChart(); taskHealthState={{}}; startSSE('{result["id"]}');</script>
+        <script>requestAnimationFrame(function() {{ initChart(); taskHealthState={{}}; startSSE('{result["id"]}'); }});</script>
         """)
 
     error = (

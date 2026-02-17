@@ -30,14 +30,15 @@ class JobInfo:
     error: Optional[str] = None
 
     def to_dict(self) -> dict:
-        """Serialize for JSON API."""
+        """Serialize for JSON API.  Omits losses to keep response small;
+        use /jobs/{id}/loss_history for chart data."""
         return {
             "id": self.id,
             "state": self.state,
             "total_steps": self.total_steps,
             "current_step": self.current_step,
             "task_names": self.task_names,
-            "losses": self.losses,
+            "n_losses": len(self.losses),
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat()
             if self.completed_at
