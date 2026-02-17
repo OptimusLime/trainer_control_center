@@ -27,6 +27,7 @@ from acc.recipes.runner import RecipeRunner
 from acc.recipes.registry import RecipeRegistry
 from acc.tasks.registry import TaskRegistry
 from acc.generators.registry import GeneratorRegistry
+from acc.loss_health import compute_loss_summary
 
 
 class TrainerAPI:
@@ -261,13 +262,26 @@ class TrainerAPI:
                     "started_at": j.started_at.isoformat(),
                     "completed_at": j.completed_at.isoformat() if j.completed_at else None,
                 }
-                # Per-task final losses (last loss entry for each task)
+                # Per-task final losses with health (last loss entry for each task)
                 final_losses = {}
                 for loss_entry in reversed(j.losses):
                     tn = loss_entry["task_name"]
                     if tn not in final_losses:
-                        final_losses[tn] = loss_entry["task_loss"]
+                        final_losses[tn] = {
+                            "loss": loss_entry["task_loss"],
+                            "health": loss_entry.get("health", "unknown"),
+                        }
                 summary["final_losses"] = final_losses
+                # Overall health: worst across all tasks
+                healths = [v["health"] for v in final_losses.values()]
+                if "critical" in healths:
+                    summary["overall_health"] = "critical"
+                elif "warning" in healths:
+                    summary["overall_health"] = "warning"
+                elif healths:
+                    summary["overall_health"] = "healthy"
+                else:
+                    summary["overall_health"] = "unknown"
                 result.append(summary)
             return result
 
@@ -285,6 +299,24 @@ class TrainerAPI:
             if job is None:
                 return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
             return job.losses
+
+        @app.get("/jobs/current/loss_summary")
+        async def current_job_loss_summary():
+            """Per-task loss summary for the currently running job."""
+            job = self.jobs.current()
+            if job is None:
+                return JSONResponse({"error": "No current job"}, status_code=404)
+            summaries = compute_loss_summary(job.losses)
+            return {name: s.to_dict() for name, s in summaries.items()}
+
+        @app.get("/jobs/{job_id}/loss_summary")
+        async def job_loss_summary(job_id: str):
+            """Per-task loss summary with health classification for a job."""
+            job = self.jobs.get(job_id)
+            if job is None:
+                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+            summaries = compute_loss_summary(job.losses)
+            return {name: s.to_dict() for name, s in summaries.items()}
 
         @app.get("/jobs/{job_id}/stream")
         async def stream_job(job_id: str, from_step: int = 0):
@@ -399,6 +431,15 @@ class TrainerAPI:
             data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
             cp = self.checkpoints.save(self.autoencoder, self.trainer, tag=tag)
+            # Persist loss summary from the most recent completed job
+            recent_jobs = self.jobs.list()
+            for j in recent_jobs:
+                if j.losses:
+                    summaries = compute_loss_summary(j.losses)
+                    cp.metrics["loss_summary"] = {
+                        name: s.to_dict() for name, s in summaries.items()
+                    }
+                    break
             return cp.to_dict()
 
         @app.post("/checkpoints/load")

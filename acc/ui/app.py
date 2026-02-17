@@ -240,7 +240,9 @@ def _chart_js() -> str:
 
     const CHART_COLORS = ['#58a6ff', '#7ee787', '#f0883e', '#f778ba', '#d2a8ff', '#ff7b72', '#79c0ff', '#a5d6ff'];
 
-    function addLossPoint(step, taskName, loss) {
+    const HEALTH_COLORS = { healthy: '#7ee787', warning: '#f0883e', critical: '#f85149' };
+
+    function addLossPoint(step, taskName, loss, health) {
         if (!lossData[taskName]) {
             const idx = Object.keys(lossData).length;
             lossData[taskName] = {
@@ -263,12 +265,40 @@ def _chart_js() -> str:
         const counter = document.getElementById('step-counter');
         if (counter) counter.textContent = '[step: ' + step + ']';
 
-        // Update loss log
+        // Update loss log with health coloring
         const log = document.getElementById('loss-log');
         if (log) {
-            log.innerHTML += '<div>step ' + step + ' | ' + taskName + ': ' + loss.toFixed(4) + '</div>';
+            const color = HEALTH_COLORS[health] || '#8b949e';
+            log.innerHTML += '<div style="color:' + color + ';">step ' + step + ' | ' + taskName + ': ' + loss.toFixed(4) + (health === 'critical' ? ' !!!' : health === 'warning' ? ' !' : '') + '</div>';
             log.scrollTop = log.scrollHeight;
         }
+
+        // Update live health banner
+        if (health) {
+            updateHealthBanner(taskName, loss, health);
+        }
+    }
+
+    // Track worst health across all tasks for the banner
+    let taskHealthState = {};
+    function updateHealthBanner(taskName, loss, health) {
+        taskHealthState[taskName] = { loss: loss, health: health };
+        const banner = document.getElementById('health-banner');
+        if (!banner) return;
+        let worst = 'healthy';
+        let parts = [];
+        for (const [tn, st] of Object.entries(taskHealthState)) {
+            if (st.health === 'critical') worst = 'critical';
+            else if (st.health === 'warning' && worst !== 'critical') worst = 'warning';
+            const c = HEALTH_COLORS[st.health] || '#8b949e';
+            parts.push('<span style="color:' + c + ';">' + tn + ': ' + st.loss.toFixed(4) + '</span>');
+        }
+        const bgColor = worst === 'critical' ? '#3d1114' : worst === 'warning' ? '#3d2e14' : '#14261a';
+        const borderColor = HEALTH_COLORS[worst];
+        banner.style.background = bgColor;
+        banner.style.borderColor = borderColor;
+        banner.style.display = 'block';
+        banner.innerHTML = parts.join(' &nbsp;|&nbsp; ');
     }
 
     function loadLossHistory(jobId) {
@@ -276,10 +306,36 @@ def _chart_js() -> str:
         fetch('/api/jobs/' + jobId + '/loss_history').then(r => r.json()).then(data => {
             if (!Array.isArray(data)) return;
             lossData = {};
+            taskHealthState = {};
             data.forEach(function(entry) {
-                addLossPoint(entry.step, entry.task_name, entry.task_loss);
+                addLossPoint(entry.step, entry.task_name, entry.task_loss, entry.health || null);
             });
             lastStep = data.length > 0 ? data[data.length - 1].step : 0;
+            // Also load and display the loss summary
+            loadLossSummary(jobId);
+        }).catch(() => {});
+    }
+
+    function loadLossSummary(jobId) {
+        fetch('/api/jobs/' + jobId + '/loss_summary').then(r => r.json()).then(data => {
+            const panel = document.getElementById('loss-summary-content');
+            if (!panel || !data || data.error) return;
+            let html = '<table class="eval-table"><thead><tr><th>Task</th><th>Final</th><th>Mean</th><th>Min</th><th>Max</th><th>Trend</th><th>Health</th></tr></thead><tbody>';
+            for (const [taskName, s] of Object.entries(data)) {
+                const c = HEALTH_COLORS[s.health] || '#8b949e';
+                const trendIcon = s.trend === 'improving' ? '&#9660;' : s.trend === 'worsening' ? '&#9650;' : '&#9644;';
+                const trendColor = s.trend === 'improving' ? '#7ee787' : s.trend === 'worsening' ? '#f85149' : '#8b949e';
+                html += '<tr><td style="color:#f0f6fc;">' + taskName + '</td>';
+                html += '<td style="color:' + c + ';font-weight:700;">' + s.final.toFixed(4) + '</td>';
+                html += '<td>' + s.mean.toFixed(4) + '</td>';
+                html += '<td>' + s.min.toFixed(4) + '</td>';
+                html += '<td>' + s.max.toFixed(4) + '</td>';
+                html += '<td style="color:' + trendColor + ';">' + trendIcon + ' ' + s.trend + '</td>';
+                html += '<td style="color:' + c + ';font-weight:700;">' + s.health.toUpperCase() + '</td>';
+                html += '</tr>';
+            }
+            html += '</tbody></table>';
+            panel.innerHTML = html;
         }).catch(() => {});
     }
 
@@ -293,6 +349,8 @@ def _chart_js() -> str:
             const data = JSON.parse(e.data);
             if (data.done) {
                 eventSource.close();
+                // Load final loss summary for the completed job
+                loadLossSummary(jobId);
                 htmx.trigger('#training-panel', 'refresh');
                 htmx.trigger('#eval-panel', 'refresh');
                 htmx.trigger('#recon-panel', 'refresh');
@@ -300,7 +358,7 @@ def _chart_js() -> str:
                 htmx.trigger('#jobs-panel', 'refresh');
                 return;
             }
-            addLossPoint(data.step, data.task_name, data.task_loss);
+            addLossPoint(data.step, data.task_name, data.task_loss, data.health || null);
             lastStep = data.step;
         };
     }
@@ -523,6 +581,7 @@ async def partial_training(request: Request):
     return HTMLResponse(f"""
     <div class="panel">
         <h3>Training</h3>
+        <div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>
         <div class="training-controls">
             <label>Steps:</label>
             <input type="number" id="train-steps" name="train-steps" value="500" min="1">
@@ -552,6 +611,10 @@ async def partial_training(request: Request):
             <canvas id="loss-chart"></canvas>
         </div>
         <div id="loss-log"></div>
+    </div>
+    <div class="panel" id="loss-summary-panel">
+        <h3>Loss Summary</h3>
+        <div id="loss-summary-content"><div class="empty">Train or click a job to see summary</div></div>
     </div>
     <script>initChart();</script>
     """)
@@ -882,19 +945,33 @@ async def partial_jobs_history(request: Request):
         total = j.get("total_steps", 0)
         job_id = j["id"]
 
-        # Final losses summary
+        # Final losses summary with health coloring
         final_losses = j.get("final_losses", {})
-        loss_summary = "  ".join(f"{k}: {v:.3f}" for k, v in final_losses.items())
-        if not loss_summary:
-            loss_summary = "no data"
+        overall_health = j.get("overall_health", "unknown")
+        health_colors = {"healthy": "#7ee787", "warning": "#f0883e", "critical": "#f85149", "unknown": "#8b949e"}
+        loss_parts = []
+        for k, v in final_losses.items():
+            if isinstance(v, dict):
+                loss_val = v.get("loss", 0)
+                health = v.get("health", "unknown")
+                color = health_colors.get(health, "#8b949e")
+                loss_parts.append(f'<span style="color:{color};">{k}: {loss_val:.3f}</span>')
+            else:
+                # Backward compat: old format was just a float
+                loss_parts.append(f'<span style="color:#8b949e;">{k}: {v:.3f}</span>')
+        loss_summary = "  ".join(loss_parts) if loss_parts else "no data"
+
+        # Overall health indicator
+        oh_color = health_colors.get(overall_health, "#8b949e")
+        health_dot = f'<span style="color:{oh_color};">&#9679;</span>'
 
         items += f"""
         <div class="job-item" onclick="initChart(); loadLossHistory('{job_id}');">
             <div style="display:flex;justify-content:space-between;">
-                <span style="color:#f0f6fc;">{job_id[:8]}</span>
+                <span style="color:#f0f6fc;">{health_dot} {job_id[:8]}</span>
                 <span class="{state_class}" style="font-size:11px;">{state}</span>
             </div>
-            <div style="color:#8b949e;font-size:11px;">{steps}/{total} steps | {loss_summary}</div>
+            <div style="font-size:11px;">{steps}/{total} steps | {loss_summary}</div>
         </div>"""
 
     return HTMLResponse(f"""
@@ -1113,11 +1190,26 @@ async def partial_checkpoints_tree(request: Request):
         else:
             children.setdefault(pid, []).append(n)
 
+    health_colors = {"healthy": "#7ee787", "warning": "#f0883e", "critical": "#f85149"}
+
     def render_node(node, depth=0):
         nid = node["id"]
         tag = node["tag"]
         short_id = nid[:8]
         is_current = nid == current_id
+        metrics = node.get("metrics", {})
+
+        # Determine health indicator from loss_summary in metrics
+        loss_summary = metrics.get("loss_summary", {})
+        health_dot = ""
+        if loss_summary:
+            healths = [s.get("health", "unknown") for s in loss_summary.values() if isinstance(s, dict)]
+            if "critical" in healths:
+                health_dot = f'<span style="color:{health_colors["critical"]};">&#9679;</span>'
+            elif "warning" in healths:
+                health_dot = f'<span style="color:{health_colors["warning"]};">&#9679;</span>'
+            elif healths:
+                health_dot = f'<span style="color:{health_colors["healthy"]};">&#9679;</span>'
 
         indent = '<span class="tree-indent">&#9474;</span>' * depth
         if depth > 0:
@@ -1132,6 +1224,7 @@ async def partial_checkpoints_tree(request: Request):
         html = f"""
         <div class="tree-node{current_cls}">
             {indent}
+            {health_dot}
             <span class="tree-tag">{tag}</span>
             <span class="tree-meta">({short_id}){marker}</span>
             <span class="tree-actions">
@@ -1358,6 +1451,7 @@ async def action_train(request: Request):
         return HTMLResponse(f"""
         <div class="panel">
             <h3>Training</h3>
+            <div id="health-banner" style="display:none;padding:6px 10px;border-radius:4px;border:1px solid #30363d;margin-bottom:8px;font-size:12px;font-weight:600;"></div>
             <div class="training-controls">
                 <label>Steps:</label>
                 <input type="number" id="train-steps" value="{steps}" min="1">
@@ -1378,7 +1472,11 @@ async def action_train(request: Request):
             </div>
             <div id="loss-log"></div>
         </div>
-        <script>initChart(); startSSE('{result["id"]}');</script>
+        <div class="panel" id="loss-summary-panel">
+            <h3>Loss Summary</h3>
+            <div id="loss-summary-content"><div class="empty">Training in progress...</div></div>
+        </div>
+        <script>initChart(); taskHealthState={{}}; startSSE('{result["id"]}');</script>
         """)
 
     error = (
@@ -1643,6 +1741,16 @@ async def api_jobs_loss_history(request: Request):
     )
 
 
+async def api_jobs_loss_summary(request: Request):
+    """Proxy for JS to fetch loss summary for a job."""
+    job_id = request.path_params["job_id"]
+    data = await _api(f"/jobs/{job_id}/loss_summary")
+    return HTMLResponse(
+        json.dumps(data),
+        media_type="application/json",
+    )
+
+
 # ─── App ───
 
 routes = [
@@ -1685,6 +1793,7 @@ routes = [
     Route("/sse/job/{job_id}", sse_job),
     Route("/api/jobs/current", api_jobs_current),
     Route("/api/jobs/{job_id}/loss_history", api_jobs_loss_history),
+    Route("/api/jobs/{job_id}/loss_summary", api_jobs_loss_summary),
 ]
 
 app = Starlette(routes=routes)

@@ -90,7 +90,7 @@ class RecipeContext:
         self._api.trainer = None
 
     def save_checkpoint(self, tag: str) -> str:
-        """Save current state, return checkpoint_id."""
+        """Save current state, return checkpoint_id. Persists loss summary from most recent job."""
         if self._api.autoencoder is None:
             raise RuntimeError("No model to checkpoint.")
         self._ensure_trainer()
@@ -98,6 +98,16 @@ class RecipeContext:
             from acc.checkpoints import CheckpointStore
             self._api.checkpoints = CheckpointStore("./acc/checkpoints_data")
         cp = self._api.checkpoints.save(self._api.autoencoder, self._api.trainer, tag=tag)
+        # Persist loss summary from most recent job
+        from acc.loss_health import compute_loss_summary
+        recent_jobs = self._api.jobs.list()
+        for j in recent_jobs:
+            if j.losses:
+                summaries = compute_loss_summary(j.losses)
+                cp.metrics["loss_summary"] = {
+                    name: s.to_dict() for name, s in summaries.items()
+                }
+                break
         self._checkpoints_created.append(cp.id)
         return cp.id
 
@@ -114,7 +124,7 @@ class RecipeContext:
         return fork_cp.id
 
     def train(self, steps: int, lr: float = 1e-3, probe_lr: float = 1e-3, batch_size: int = 64) -> list[dict]:
-        """Train for N steps. Blocks until complete."""
+        """Train for N steps. Routes through JobManager so losses are visible in the dashboard."""
         if self._stopped:
             return []
         self._ensure_trainer(batch_size=batch_size)
@@ -125,7 +135,16 @@ class RecipeContext:
             trainer._build_optimizers()
         if trainer.batch_size != batch_size:
             trainer.batch_size = batch_size
-        return trainer.train(steps=steps)
+        # Route through JobManager: creates a job, wires on_step for SSE + loss history,
+        # runs synchronously (blocking=True). This makes recipe training visible in the
+        # dashboard's loss chart, loss log, job history, and loss summary.
+        job = self._api.jobs.start(
+            trainer,
+            steps=steps,
+            checkpoint_id=self.current_checkpoint_id,
+            blocking=True,
+        )
+        return job.losses
 
     def evaluate(self) -> dict[str, dict[str, float]]:
         """Run eval on all tasks."""

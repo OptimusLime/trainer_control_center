@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from acc.tasks.base import Task
+from acc.loss_health import classify_loss
 
 
 class Trainer:
@@ -143,10 +144,14 @@ class Trainer:
                 self.probe_optimizer.step()
 
             # Record
+            loss_val = loss.item()
+            task_type = type(task).__name__
             step_info = {
                 "step": step,
                 "task_name": task.name,
-                "task_loss": loss.item(),
+                "task_type": task_type,
+                "task_loss": loss_val,
+                "health": classify_loss(task_type, loss_val).value,
             }
             loss_history.append(step_info)
 

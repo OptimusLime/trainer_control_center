@@ -160,6 +160,8 @@ def main():
     print("\n=== 5. Recipe infrastructure — tiny recipe with fork ===")
 
     # Create a minimal TrainerAPI-like object for RecipeContext
+    from acc.jobs import JobManager
+
     class FakeAPI:
         def __init__(self):
             self.autoencoder = None
@@ -168,6 +170,7 @@ def main():
             self.datasets = {}
             self.device = device
             self.checkpoints = CheckpointStore(test_checkpoint_dir)
+            self.jobs = JobManager()
 
     api = FakeAPI()
 
