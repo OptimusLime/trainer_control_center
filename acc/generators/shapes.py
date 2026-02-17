@@ -10,6 +10,25 @@ import math
 import torch
 
 from acc.dataset import AccDataset
+from acc.generators.base import DatasetGenerator
+
+
+class ShapesGenerator(DatasetGenerator):
+    """Generate synthetic shape images with factor labels."""
+
+    name = "shapes"
+    description = "Circles/squares/triangles with position, scale, and shape class targets"
+    parameters = {
+        "n": {"type": "int", "default": 5000, "description": "Number of images"},
+        "image_size": {"type": "int", "default": 64, "description": "Image size (square)"},
+        "num_shapes": {"type": "int", "default": 3, "description": "Number of shape types (up to 3)"},
+    }
+
+    def generate(self, **params) -> AccDataset:
+        n = int(params.get("n", 5000))
+        image_size = int(params.get("image_size", 64))
+        num_shapes = int(params.get("num_shapes", 3))
+        return generate_shapes(n=n, image_size=image_size, num_shapes=num_shapes)
 
 
 def generate_shapes(

@@ -1,6 +1,6 @@
 """Thickness generator — lines and curves at controlled stroke widths.
 
-Produces 32×32 grayscale images of white strokes on black backgrounds,
+Produces 32x32 grayscale images of white strokes on black backgrounds,
 similar to MNIST visual style. Each image has a single stroke with a
 controlled width. The target label is the normalized stroke width (0-1).
 
@@ -16,6 +16,23 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from acc.dataset import AccDataset
+from acc.generators.base import DatasetGenerator
+
+
+class ThicknessGenerator(DatasetGenerator):
+    """Generate synthetic thickness dataset with controlled stroke widths."""
+
+    name = "thickness"
+    description = "White strokes at controlled widths, target = normalized width (0-1)"
+    parameters = {
+        "n": {"type": "int", "default": 5000, "description": "Number of images"},
+        "image_size": {"type": "int", "default": 32, "description": "Image size (square)"},
+    }
+
+    def generate(self, **params) -> AccDataset:
+        n = int(params.get("n", 5000))
+        image_size = int(params.get("image_size", 32))
+        return generate_thickness(n=n, image_size=image_size)
 
 
 def generate_thickness(n: int = 5000, image_size: int = 32) -> AccDataset:

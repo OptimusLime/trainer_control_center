@@ -1,8 +1,8 @@
 """Slant generator — strokes at controlled angles.
 
-Produces 32×32 grayscale images of white strokes on black backgrounds,
+Produces 32x32 grayscale images of white strokes on black backgrounds,
 similar to MNIST visual style. Each image has strokes at a controlled
-angle. The target label is the normalized angle (0-1, mapping -45° to +45°).
+angle. The target label is the normalized angle (0-1, mapping -45 to +45 degrees).
 
 The encoder sees these through the same conv weights as MNIST digits.
 When the slant probe trains on these, it pushes z[7:10] to encode
@@ -16,6 +16,23 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from acc.dataset import AccDataset
+from acc.generators.base import DatasetGenerator
+
+
+class SlantGenerator(DatasetGenerator):
+    """Generate synthetic slant dataset with controlled stroke angles."""
+
+    name = "slant"
+    description = "White strokes at controlled angles, target = normalized angle (0-1)"
+    parameters = {
+        "n": {"type": "int", "default": 5000, "description": "Number of images"},
+        "image_size": {"type": "int", "default": 32, "description": "Image size (square)"},
+    }
+
+    def generate(self, **params) -> AccDataset:
+        n = int(params.get("n", 5000))
+        image_size = int(params.get("image_size", 32))
+        return generate_slant(n=n, image_size=image_size)
 
 
 def generate_slant(n: int = 5000, image_size: int = 32) -> AccDataset:

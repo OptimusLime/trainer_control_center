@@ -25,6 +25,8 @@ from acc.tasks.base import Task, TaskError
 from acc.dataset import AccDataset
 from acc.recipes.runner import RecipeRunner
 from acc.recipes.registry import RecipeRegistry
+from acc.tasks.registry import TaskRegistry
+from acc.generators.registry import GeneratorRegistry
 
 
 class TrainerAPI:
@@ -46,6 +48,10 @@ class TrainerAPI:
         self.recipe_runner = RecipeRunner()
         self.recipe_registry = RecipeRegistry()
         self.recipe_registry.start_watcher()  # Hot-reload recipes on file change
+        self.task_registry = TaskRegistry()
+        self.task_registry.start_watcher()  # Hot-reload tasks on file change
+        self.generator_registry = GeneratorRegistry()
+        self.generator_registry.start_watcher()  # Hot-reload generators on file change
 
         self._register_routes()
 
@@ -129,12 +135,19 @@ class TrainerAPI:
             if dataset is None:
                 return JSONResponse({"error": f"Dataset '{dataset_name}' not found"}, status_code=400)
 
-            task_class = _resolve_task_class(class_name)
+            task_class = self.task_registry.get(class_name)
             if task_class is None:
                 return JSONResponse({"error": f"Unknown task class: {class_name}"}, status_code=400)
 
+            # Parse optional latent_slice (e.g. "0:4" -> (0, 4))
+            latent_slice = None
+            slice_str = data.get("latent_slice")
+            if slice_str and ":" in str(slice_str):
+                parts = str(slice_str).split(":")
+                latent_slice = (int(parts[0]), int(parts[1]))
+
             try:
-                task = task_class(task_name, dataset, weight=weight)
+                task = task_class(task_name, dataset, weight=weight, latent_slice=latent_slice)
                 task.attach(self.autoencoder)
             except TaskError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
@@ -150,6 +163,18 @@ class TrainerAPI:
                 return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
             task.enabled = not task.enabled
             return {"name": name, "enabled": task.enabled}
+
+        @app.post("/tasks/{name}/set_weight")
+        async def set_task_weight(name: str, request: Request):
+            task = self.tasks.get(name)
+            if task is None:
+                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
+            data = await request.json()
+            weight = data.get("weight")
+            if weight is None:
+                return JSONResponse({"error": "Missing 'weight' field"}, status_code=400)
+            task.weight = float(weight)
+            return task.describe()
 
         @app.post("/tasks/{name}/remove")
         async def remove_task(name: str):
@@ -204,12 +229,45 @@ class TrainerAPI:
                 return JSONResponse(content=None)
             return job.to_dict()
 
+        @app.get("/jobs/history")
+        async def jobs_history(limit: int = 10):
+            """Recent completed/stopped jobs with summary stats."""
+            all_jobs = self.jobs.list()
+            recent = all_jobs[:limit]
+            result = []
+            for j in recent:
+                summary = {
+                    "id": j.id,
+                    "state": j.state,
+                    "total_steps": j.total_steps,
+                    "current_step": j.current_step,
+                    "started_at": j.started_at.isoformat(),
+                    "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                }
+                # Per-task final losses (last loss entry for each task)
+                final_losses = {}
+                for loss_entry in reversed(j.losses):
+                    tn = loss_entry["task_name"]
+                    if tn not in final_losses:
+                        final_losses[tn] = loss_entry["task_loss"]
+                summary["final_losses"] = final_losses
+                result.append(summary)
+            return result
+
         @app.get("/jobs/{job_id}")
         async def get_job(job_id: str):
             job = self.jobs.get(job_id)
             if job is None:
                 return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
             return job.to_dict()
+
+        @app.get("/jobs/{job_id}/loss_history")
+        async def job_loss_history(job_id: str):
+            """Full loss history for a job — used to populate charts on page load."""
+            job = self.jobs.get(job_id)
+            if job is None:
+                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+            return job.losses
 
         @app.get("/jobs/{job_id}/stream")
         async def stream_job(job_id: str, from_step: int = 0):
@@ -238,6 +296,33 @@ class TrainerAPI:
                 return JSONResponse({"error": "No trainer"}, status_code=400)
             results = self.trainer.evaluate_all()
             return results
+
+        @app.post("/eval/reconstructions")
+        async def eval_reconstructions(request: Request):
+            """Encode + decode N images, return originals and reconstructions side-by-side."""
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model loaded"}, status_code=400)
+            if not self.autoencoder.has_decoder:
+                return JSONResponse({"error": "Model has no decoder"}, status_code=400)
+
+            data = await request.json() if await request.body() else {}
+            n = data.get("n", 8)
+
+            # Get images from first available dataset
+            ds = next(iter(self.datasets.values()), None) if self.datasets else None
+            if ds is None:
+                return JSONResponse({"error": "No datasets loaded"}, status_code=400)
+
+            self.autoencoder.eval()
+            with torch.no_grad():
+                images = ds.sample(n).to(self.device)
+                model_out = self.autoencoder(images)
+                recon = model_out[ModelOutput.RECONSTRUCTION]
+
+                originals = [_tensor_to_base64(images[i]) for i in range(n)]
+                reconstructions = [_tensor_to_base64(recon[i]) for i in range(n)]
+
+            return {"originals": originals, "reconstructions": reconstructions}
 
         # -- Checkpoints --
         @app.get("/checkpoints")
@@ -293,21 +378,8 @@ class TrainerAPI:
         # -- Registry (what's available) --
         @app.get("/registry/tasks")
         async def registry_tasks():
-            """List available task classes."""
-            return [
-                {
-                    "class_name": "ClassificationTask",
-                    "description": "Linear probe classification with cross-entropy loss",
-                },
-                {
-                    "class_name": "ReconstructionTask",
-                    "description": "Reconstruction via decoder with L1 loss",
-                },
-                {
-                    "class_name": "RegressionTask",
-                    "description": "Linear probe regression with MSE loss, MAE eval",
-                },
-            ]
+            """List available task classes — discovered dynamically by TaskRegistry."""
+            return self.task_registry.list()
 
         @app.get("/registry/layers")
         async def registry_layers():
@@ -337,6 +409,34 @@ class TrainerAPI:
                     "description": "Per-factor MLP projection to shared embed space",
                 },
             ]
+
+        # -- Generators --
+        @app.get("/registry/generators")
+        async def registry_generators():
+            """List available dataset generators — discovered dynamically by GeneratorRegistry."""
+            return self.generator_registry.list()
+
+        @app.post("/generators/generate")
+        async def generate_dataset(request: Request):
+            """Generate a dataset using a registered generator.
+
+            Body: {"generator_name": "thickness", "params": {"n": 1000, "image_size": 32}}
+            """
+            data = await request.json()
+            gen_name = data.get("generator_name")
+            params = data.get("params", {})
+
+            generator = self.generator_registry.get(gen_name)
+            if generator is None:
+                return JSONResponse({"error": f"Generator '{gen_name}' not found"}, status_code=404)
+
+            try:
+                dataset = generator.generate(**params)
+                # Register the dataset
+                self.datasets[dataset.name] = dataset
+                return dataset.describe()
+            except Exception as e:
+                return JSONResponse({"error": f"Generation failed: {e}"}, status_code=500)
 
         # -- Recipes --
         # Static routes MUST come before parameterized {name} routes
@@ -499,6 +599,7 @@ class TrainerAPI:
                 "num_tasks": len(self.tasks),
                 "num_datasets": len(self.datasets),
                 "num_recipes": len(self.recipe_registry.list()),
+                "num_generators": len(self.generator_registry.list()),
                 "recipe_running": recipe_job is not None and recipe_job.state == "running",
                 "device": str(self.device),
             }
@@ -547,20 +648,6 @@ class TrainerAPI:
         """Start the HTTP server. No auto-reload — trainer holds in-memory state."""
         import uvicorn
         uvicorn.run(self.app, host=host, port=port)
-
-
-def _resolve_task_class(class_name: str):
-    """Resolve a task class name to the actual class."""
-    from acc.tasks.classification import ClassificationTask
-    from acc.tasks.reconstruction import ReconstructionTask
-    from acc.tasks.regression import RegressionTask
-
-    classes = {
-        "ClassificationTask": ClassificationTask,
-        "ReconstructionTask": ReconstructionTask,
-        "RegressionTask": RegressionTask,
-    }
-    return classes.get(class_name)
 
 
 def _decode_z(model: torch.nn.Module, z: torch.Tensor) -> torch.Tensor:

@@ -2,6 +2,9 @@
 
 Stateless: all state comes from the trainer API (localhost:6060).
 HTMX for partial page updates. SSE for live training loss streaming.
+
+M2 dashboard: task management, per-task loss curves, reconstruction
+comparison, eval metrics display, persistent training history.
 """
 
 import json
@@ -47,7 +50,7 @@ def _page(title: str, body: str) -> str:
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; background: #0d1117; color: #c9d1d9; font-size: 13px; }}
-        .layout {{ display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }}
+        .layout {{ display: grid; grid-template-columns: 300px 1fr; min-height: 100vh; }}
         .sidebar {{ background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }}
         .main {{ padding: 16px; overflow-y: auto; }}
         .header {{ background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; grid-column: 1 / -1; }}
@@ -65,6 +68,7 @@ def _page(title: str, body: str) -> str:
         .btn-primary:hover {{ background: #2ea043; }}
         .btn-danger {{ background: #da3633; border-color: #da3633; color: #fff; }}
         .btn-danger:hover {{ background: #f85149; }}
+        .btn-sm {{ padding: 2px 6px; font-size: 11px; }}
         .training-controls {{ display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }}
         .training-controls input {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 80px; font-family: inherit; }}
         .training-controls label {{ color: #8b949e; font-size: 11px; }}
@@ -75,13 +79,17 @@ def _page(title: str, body: str) -> str:
         .checkpoint .meta {{ color: #8b949e; font-size: 11px; }}
         .recon-grid {{ display: flex; gap: 4px; flex-wrap: wrap; }}
         .recon-grid img {{ width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #30363d; }}
+        .recon-pair {{ display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }}
+        .recon-pair img {{ width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #30363d; }}
+        .recon-pair .recon-label {{ font-size: 9px; color: #8b949e; }}
         .recon-row {{ margin-bottom: 4px; }}
         .recon-label {{ color: #8b949e; font-size: 11px; margin-bottom: 2px; }}
         .status-running {{ color: #f0883e; }}
         .status-completed {{ color: #7ee787; }}
         .status-stopped {{ color: #8b949e; }}
         .status-failed {{ color: #f85149; }}
-        .job-item {{ padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 12px; }}
+        .job-item {{ padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 12px; cursor: pointer; }}
+        .job-item:hover {{ background: #1c2333; }}
         .empty {{ color: #484f58; font-style: italic; padding: 8px 0; }}
         .error {{ color: #f85149; padding: 8px; background: #1c0b0b; border: 1px solid #f85149; border-radius: 4px; margin: 8px 0; }}
         #loss-log {{ max-height: 120px; overflow-y: auto; font-size: 11px; color: #8b949e; background: #0d1117; padding: 4px; border-radius: 4px; margin-top: 8px; }}
@@ -107,6 +115,16 @@ def _page(title: str, body: str) -> str:
         .sort-row {{ display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }}
         .sort-label {{ color: #8b949e; font-size: 11px; margin-bottom: 2px; }}
         .sort-row img {{ width: 32px; height: 32px; image-rendering: pixelated; border: 1px solid #21262d; }}
+        .form-group {{ margin-bottom: 8px; }}
+        .form-group label {{ display: block; color: #8b949e; font-size: 11px; margin-bottom: 3px; }}
+        .form-group select, .form-group input {{ background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 12px; }}
+        .eval-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+        .eval-table th {{ text-align: left; color: #8b949e; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #30363d; }}
+        .eval-table td {{ padding: 4px 8px; border-bottom: 1px solid #21262d; }}
+        .metric-good {{ color: #7ee787; }}
+        .metric-mid {{ color: #f0883e; }}
+        .metric-bad {{ color: #f85149; }}
+        .weight-input {{ width: 50px !important; display: inline !important; padding: 2px 4px !important; }}
     </style>
 </head>
 <body>
@@ -143,6 +161,12 @@ def _sidebar_placeholder() -> str:
         <div id="tasks-panel" hx-get="/partial/tasks" hx-trigger="load, every 3s">
             <div class="panel"><h3>Tasks</h3><div class="empty">Loading...</div></div>
         </div>
+        <div id="add-task-panel" hx-get="/partial/add_task" hx-trigger="load, every 5s">
+            <div class="panel"><h3>+ Task</h3><div class="empty">Loading...</div></div>
+        </div>
+        <div id="generate-panel" hx-get="/partial/generate" hx-trigger="load, every 5s">
+            <div class="panel"><h3>+ Dataset</h3><div class="empty">Loading...</div></div>
+        </div>
         <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 5s">
             <div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Loading...</div></div>
         </div>
@@ -154,11 +178,14 @@ def _main_placeholder() -> str:
         <div id="training-panel" hx-get="/partial/training" hx-trigger="load">
             <div class="panel"><h3>Training</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 5s">
+        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 10s">
             <div class="panel"><h3>Reconstructions</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load, every 5s">
+        <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load">
             <div class="panel"><h3>Eval Metrics</h3><div class="empty">Loading...</div></div>
+        </div>
+        <div id="jobs-panel" hx-get="/partial/jobs_history" hx-trigger="load, every 5s">
+            <div class="panel"><h3>Job History</h3><div class="empty">Loading...</div></div>
         </div>
         <div id="traversal-panel" hx-get="/partial/traversals" hx-trigger="load">
             <div class="panel"><h3>Latent Traversals</h3><div class="empty">Run eval to generate</div></div>
@@ -167,7 +194,7 @@ def _main_placeholder() -> str:
             <div class="panel"><h3>Sort by Factor</h3><div class="empty">Run eval to generate</div></div>
         </div>
         <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s">
-            <div class="panel"><h3>Dataset Browser</h3><div class="empty">Loading...</div></div>
+            <div class="panel"><h3>Datasets</h3><div class="empty">Loading...</div></div>
         </div>
     """
 
@@ -194,16 +221,24 @@ def _chart_js() -> str:
                     x: { type: 'linear', title: { display: true, text: 'Step', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
                     y: { title: { display: true, text: 'Loss', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } }
                 },
-                plugins: { legend: { labels: { color: '#c9d1d9' } } }
+                plugins: { legend: { labels: { color: '#c9d1d9', font: { size: 11 } } } }
             }
         });
     }
 
+    const CHART_COLORS = ['#58a6ff', '#7ee787', '#f0883e', '#f778ba', '#d2a8ff', '#ff7b72', '#79c0ff', '#a5d6ff'];
+
     function addLossPoint(step, taskName, loss) {
         if (!lossData[taskName]) {
-            const colors = ['#58a6ff', '#7ee787', '#f0883e', '#f778ba', '#d2a8ff'];
             const idx = Object.keys(lossData).length;
-            lossData[taskName] = { label: taskName, data: [], borderColor: colors[idx % colors.length], borderWidth: 1.5, pointRadius: 0, fill: false };
+            lossData[taskName] = {
+                label: taskName,
+                data: [],
+                borderColor: CHART_COLORS[idx % CHART_COLORS.length],
+                borderWidth: 1.5,
+                pointRadius: 0,
+                fill: false
+            };
         }
         lossData[taskName].data.push({ x: step, y: loss });
 
@@ -224,6 +259,18 @@ def _chart_js() -> str:
         }
     }
 
+    function loadLossHistory(jobId) {
+        // Fetch full loss history for a job and populate chart
+        fetch('/api/jobs/' + jobId + '/loss_history').then(r => r.json()).then(data => {
+            if (!Array.isArray(data)) return;
+            lossData = {};
+            data.forEach(function(entry) {
+                addLossPoint(entry.step, entry.task_name, entry.task_loss);
+            });
+            lastStep = data.length > 0 ? data[data.length - 1].step : 0;
+        }).catch(() => {});
+    }
+
     function startSSE(jobId) {
         if (eventSource) { eventSource.close(); }
         lossData = {};
@@ -238,6 +285,7 @@ def _chart_js() -> str:
                 htmx.trigger('#eval-panel', 'refresh');
                 htmx.trigger('#recon-panel', 'refresh');
                 htmx.trigger('#tasks-panel', 'refresh');
+                htmx.trigger('#jobs-panel', 'refresh');
                 return;
             }
             addLossPoint(data.step, data.task_name, data.task_loss);
@@ -248,8 +296,18 @@ def _chart_js() -> str:
     // Auto-connect to running job on page load
     document.addEventListener('DOMContentLoaded', function() {
         fetch('/api/jobs/current').then(r => r.json()).then(data => {
-            if (data && data.id && data.state === 'running') {
-                setTimeout(function() { initChart(); startSSE(data.id); }, 500);
+            if (data && data.id) {
+                setTimeout(function() {
+                    initChart();
+                    if (data.state === 'running') {
+                        // Load existing history then connect SSE
+                        loadLossHistory(data.id);
+                        setTimeout(function() { startSSE(data.id); }, 300);
+                    } else {
+                        // Job completed — just load its history
+                        loadLossHistory(data.id);
+                    }
+                }, 500);
             }
         }).catch(() => {});
     });
@@ -282,32 +340,166 @@ async def partial_model(request: Request):
 
 
 async def partial_tasks(request: Request):
+    """Enhanced task cards with weight adjustment and remove button."""
     tasks = await _api("/tasks")
     if not tasks or "error" in (tasks if isinstance(tasks, dict) else {}):
         return HTMLResponse(
-            '<div class="panel"><h3>Tasks</h3><div class="empty">No tasks</div></div>'
+            '<div class="panel"><h3>Tasks</h3><div class="empty">No tasks attached</div></div>'
         )
 
     cards = ""
     for t in tasks:
         enabled = "on" if t.get("enabled") else "off"
         check = "checked" if t.get("enabled") else ""
+        name = t["name"]
+        task_type = t["type"]
+        weight = t.get("weight", 1.0)
+        dataset = t.get("dataset", "?")
+        latent_slice = t.get("latent_slice")
+        slice_str = f" | slice={latent_slice[0]}:{latent_slice[1]}" if latent_slice else ""
+
         cards += f"""
         <div class="task-card">
             <div style="display:flex;justify-content:space-between;align-items:center;">
-                <span class="name">{t["name"]}</span>
-                <input type="checkbox" {check}
-                    hx-post="/action/toggle_task/{t["name"]}"
-                    hx-target="#tasks-panel"
-                    hx-swap="innerHTML">
+                <span class="name">{name}</span>
+                <div style="display:flex;gap:4px;align-items:center;">
+                    <input type="checkbox" {check}
+                        hx-post="/action/toggle_task/{name}"
+                        hx-target="#tasks-panel"
+                        hx-swap="innerHTML">
+                    <button class="btn btn-sm btn-danger"
+                        hx-post="/action/remove_task/{name}"
+                        hx-target="#tasks-panel"
+                        hx-swap="innerHTML"
+                        hx-confirm="Remove task {name}?">&times;</button>
+                </div>
             </div>
-            <div class="type">{t["type"]} | w={t.get("weight", 1.0)} | {enabled}</div>
+            <div class="type">{task_type} | {dataset}{slice_str} | {enabled}</div>
+            <div style="display:flex;gap:4px;align-items:center;margin-top:4px;">
+                <label style="color:#8b949e;font-size:10px;">w:</label>
+                <input type="number" step="0.1" min="0" value="{weight}"
+                    class="weight-input"
+                    id="weight-{name}"
+                    hx-post="/action/set_weight/{name}"
+                    hx-include="this"
+                    hx-target="#tasks-panel"
+                    hx-swap="innerHTML"
+                    hx-trigger="change"
+                    name="weight">
+            </div>
         </div>"""
 
     return HTMLResponse(f"""
     <div class="panel">
-        <h3>Tasks</h3>
-        {cards if cards else '<div class="empty">No tasks attached</div>'}
+        <h3>Tasks ({len(tasks)})</h3>
+        {cards}
+    </div>
+    """)
+
+
+async def partial_add_task(request: Request):
+    """[+ Task] form — select class, dataset, name, weight, add."""
+    task_classes = await _api("/registry/tasks")
+    datasets = await _api("/datasets")
+
+    if not task_classes or isinstance(task_classes, dict):
+        task_options = '<option value="">No task classes available</option>'
+    else:
+        task_options = '<option value="">-- select task class --</option>'
+        for tc in task_classes:
+            desc = tc.get("description", "")
+            task_options += f'<option value="{tc["class_name"]}" title="{desc}">{tc["class_name"]}</option>'
+
+    if not datasets or isinstance(datasets, dict):
+        ds_options = '<option value="">No datasets loaded</option>'
+    else:
+        ds_options = '<option value="">-- select dataset --</option>'
+        for ds in datasets:
+            ds_options += f'<option value="{ds["name"]}">{ds["name"]} ({ds["size"]} imgs)</option>'
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>+ Task</h3>
+        <div class="form-group">
+            <label>Task Class</label>
+            <select name="class_name" id="add-task-class">{task_options}</select>
+        </div>
+        <div class="form-group">
+            <label>Dataset</label>
+            <select name="dataset_name" id="add-task-dataset">{ds_options}</select>
+        </div>
+        <div class="form-group">
+            <label>Name (optional)</label>
+            <input type="text" name="task_name" id="add-task-name" placeholder="auto-generated">
+        </div>
+        <div style="display:flex;gap:8px;">
+            <div class="form-group" style="flex:1;">
+                <label>Weight</label>
+                <input type="number" step="0.1" min="0" value="1.0" name="weight" id="add-task-weight">
+            </div>
+            <div class="form-group" style="flex:1;">
+                <label>Latent Slice</label>
+                <input type="text" name="latent_slice" id="add-task-slice" placeholder="e.g. 0:4">
+            </div>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:4px;"
+            hx-post="/action/add_task"
+            hx-include="#add-task-class, #add-task-dataset, #add-task-name, #add-task-weight, #add-task-slice"
+            hx-target="#add-task-panel"
+            hx-swap="innerHTML">Add Task</button>
+    </div>
+    """)
+
+
+async def partial_generate(request: Request):
+    """[+ Dataset] panel — pick generator, configure params, generate."""
+    generators = await _api("/registry/generators")
+
+    if not generators or isinstance(generators, dict):
+        return HTMLResponse(
+            '<div class="panel"><h3>+ Dataset</h3><div class="empty">No generators available</div></div>'
+        )
+
+    # Build generator selector and param forms
+    gen_options = '<option value="">-- select generator --</option>'
+    param_forms = ""
+    for gen in generators:
+        gen_name = gen["name"]
+        gen_desc = gen.get("description", "")
+        gen_options += f'<option value="{gen_name}" title="{gen_desc}">{gen_name}</option>'
+
+        # Build param inputs for this generator (hidden until selected)
+        params = gen.get("parameters", {})
+        param_html = ""
+        for pname, pinfo in params.items():
+            ptype = pinfo.get("type", "text")
+            pdefault = pinfo.get("default", "")
+            pdesc = pinfo.get("description", "")
+            input_type = "number" if ptype == "int" or ptype == "float" else "text"
+            param_html += f"""
+            <div class="form-group">
+                <label>{pname}: {pdesc}</label>
+                <input type="{input_type}" name="param_{pname}" value="{pdefault}">
+            </div>"""
+
+        param_forms += f'<div id="gen-params-{gen_name}" class="gen-params" style="display:none;">{param_html}</div>'
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>+ Dataset</h3>
+        <div class="form-group">
+            <label>Generator</label>
+            <select name="generator_name" id="gen-select"
+                onchange="document.querySelectorAll('.gen-params').forEach(e=>e.style.display='none'); var sel=this.value; if(sel) document.getElementById('gen-params-'+sel).style.display='block';">
+                {gen_options}
+            </select>
+        </div>
+        {param_forms}
+        <button class="btn btn-primary" style="width:100%;margin-top:4px;"
+            hx-post="/action/generate_dataset"
+            hx-include="#gen-select, [name^=param_]"
+            hx-target="#generate-panel"
+            hx-swap="innerHTML">Generate</button>
     </div>
     """)
 
@@ -342,7 +534,7 @@ async def partial_training(request: Request):
             <button class="btn"
                 hx-post="/action/save_checkpoint"
                 hx-target="#checkpoints-panel"
-                hx-swap="innerHTML">Save Checkpoint</button>
+                hx-swap="innerHTML">Save CP</button>
         </div>
         <div class="chart-container">
             <canvas id="loss-chart"></canvas>
@@ -354,64 +546,175 @@ async def partial_training(request: Request):
 
 
 async def partial_reconstructions(request: Request):
+    """Side-by-side original vs reconstruction comparison."""
     health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
             '<div class="panel"><h3>Reconstructions</h3><div class="empty">No model</div></div>'
         )
 
-    # Get sample images from first dataset
-    datasets = await _api("/datasets")
-    if not datasets or (isinstance(datasets, dict) and "error" in datasets):
-        return HTMLResponse(
-            '<div class="panel"><h3>Reconstructions</h3><div class="empty">No datasets</div></div>'
-        )
-
-    if isinstance(datasets, list) and len(datasets) > 0:
-        ds_name = datasets[0]["name"]
-        samples = await _api(f"/datasets/{ds_name}/sample?n=8")
-        if samples and "images" in samples:
-            imgs = "".join(
-                f'<img src="data:image/png;base64,{b64}">' for b64 in samples["images"]
-            )
-            return HTMLResponse(f"""
-            <div class="panel">
-                <h3>Reconstructions</h3>
-                <div class="recon-row">
-                    <div class="recon-label">Samples from {ds_name}:</div>
+    data = await _api("/eval/reconstructions", method="POST", json_data={"n": 8})
+    if not data or "error" in (data if isinstance(data, dict) else {}):
+        # Fallback: show samples only
+        datasets = await _api("/datasets")
+        if datasets and isinstance(datasets, list) and len(datasets) > 0:
+            ds_name = datasets[0]["name"]
+            samples = await _api(f"/datasets/{ds_name}/sample?n=8")
+            if samples and "images" in samples:
+                imgs = "".join(
+                    f'<img src="data:image/png;base64,{b64}">' for b64 in samples["images"]
+                )
+                return HTMLResponse(f"""
+                <div class="panel">
+                    <h3>Reconstructions</h3>
+                    <div class="recon-label">Samples from {ds_name} (no reconstructions yet):</div>
                     <div class="recon-grid">{imgs}</div>
                 </div>
-            </div>
-            """)
+                """)
+        return HTMLResponse(
+            '<div class="panel"><h3>Reconstructions</h3><div class="empty">No data</div></div>'
+        )
 
-    return HTMLResponse(
-        '<div class="panel"><h3>Reconstructions</h3><div class="empty">No data</div></div>'
-    )
+    # Side-by-side: original on top, reconstruction on bottom
+    pairs = ""
+    originals = data.get("originals", [])
+    reconstructions = data.get("reconstructions", [])
+    for i in range(len(originals)):
+        orig_b64 = originals[i]
+        recon_b64 = reconstructions[i] if i < len(reconstructions) else originals[i]
+        pairs += f"""
+        <div class="recon-pair">
+            <img src="data:image/png;base64,{orig_b64}" title="original">
+            <img src="data:image/png;base64,{recon_b64}" title="reconstruction" style="border-color:#58a6ff;">
+        </div>"""
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Reconstructions (top=input, bottom=output)</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            {pairs}
+        </div>
+        <button class="btn" style="margin-top:8px;"
+            hx-get="/partial/reconstructions"
+            hx-target="#recon-panel"
+            hx-swap="innerHTML">Refresh</button>
+    </div>
+    """)
 
 
 async def partial_eval(request: Request):
+    """Per-task eval metrics in a table with color coding."""
     health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
             '<div class="panel"><h3>Eval Metrics</h3><div class="empty">No model</div></div>'
         )
 
-    # Try to get eval results
     results = await _api("/eval/run", method="POST")
     if not results or "error" in (results if isinstance(results, dict) else {}):
-        return HTMLResponse(
-            '<div class="panel"><h3>Eval Metrics</h3><div class="empty">Run eval to see metrics</div></div>'
-        )
+        return HTMLResponse(f"""
+        <div class="panel">
+            <h3>Eval Metrics</h3>
+            <div class="empty">No eval results yet</div>
+            <button class="btn" style="margin-top:8px;"
+                hx-post="/action/eval"
+                hx-target="#eval-panel"
+                hx-swap="innerHTML">Run Eval</button>
+        </div>
+        """)
 
     rows = ""
     for task_name, metrics in results.items():
-        metric_str = "  ".join(f"{k} = {v:.4f}" for k, v in metrics.items())
-        rows += f'<div style="margin-bottom:4px;"><span style="color:#f0f6fc;">{task_name}:</span> <span class="metrics">{metric_str}</span></div>'
+        for metric_name, value in metrics.items():
+            # Color code based on metric type and value
+            css_class = _metric_color(metric_name, value)
+            rows += f"""
+            <tr>
+                <td style="color:#f0f6fc;">{task_name}</td>
+                <td>{metric_name}</td>
+                <td class="{css_class}">{value:.4f}</td>
+            </tr>"""
 
     return HTMLResponse(f"""
     <div class="panel">
         <h3>Eval Metrics</h3>
-        {rows if rows else '<div class="empty">No results</div>'}
+        <table class="eval-table">
+            <thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+        <button class="btn" style="margin-top:8px;"
+            hx-post="/action/eval"
+            hx-target="#eval-panel"
+            hx-swap="innerHTML">Run Eval</button>
+    </div>
+    """)
+
+
+def _metric_color(metric_name: str, value: float) -> str:
+    """Return CSS class for metric value color coding."""
+    name_lower = metric_name.lower()
+    if "accuracy" in name_lower:
+        if value > 0.9:
+            return "metric-good"
+        elif value > 0.5:
+            return "metric-mid"
+        return "metric-bad"
+    elif "loss" in name_lower or "mse" in name_lower or "mae" in name_lower or "l1" in name_lower:
+        if value < 0.05:
+            return "metric-good"
+        elif value < 0.2:
+            return "metric-mid"
+        return "metric-bad"
+    elif "psnr" in name_lower:
+        if value > 25:
+            return "metric-good"
+        elif value > 15:
+            return "metric-mid"
+        return "metric-bad"
+    elif "kl" in name_lower:
+        if value < 5:
+            return "metric-good"
+        elif value < 20:
+            return "metric-mid"
+        return "metric-bad"
+    return ""  # No color for unknown metrics
+
+
+async def partial_jobs_history(request: Request):
+    """Job history panel — recent jobs with summary, click to load loss curves."""
+    history = await _api("/jobs/history?limit=10")
+    if not history or isinstance(history, dict):
+        return HTMLResponse(
+            '<div class="panel"><h3>Job History</h3><div class="empty">No jobs yet</div></div>'
+        )
+
+    items = ""
+    for j in history:
+        state = j.get("state", "?")
+        state_class = f"status-{state}"
+        steps = j.get("current_step", 0)
+        total = j.get("total_steps", 0)
+        job_id = j["id"]
+
+        # Final losses summary
+        final_losses = j.get("final_losses", {})
+        loss_summary = "  ".join(f"{k}: {v:.3f}" for k, v in final_losses.items())
+        if not loss_summary:
+            loss_summary = "no data"
+
+        items += f"""
+        <div class="job-item" onclick="initChart(); loadLossHistory('{job_id}');">
+            <div style="display:flex;justify-content:space-between;">
+                <span style="color:#f0f6fc;">{job_id[:8]}</span>
+                <span class="{state_class}" style="font-size:11px;">{state}</span>
+            </div>
+            <div style="color:#8b949e;font-size:11px;">{steps}/{total} steps | {loss_summary}</div>
+        </div>"""
+
+    return HTMLResponse(f"""
+    <div class="panel">
+        <h3>Job History</h3>
+        {items if items else '<div class="empty">No jobs yet</div>'}
     </div>
     """)
 
@@ -422,30 +725,55 @@ async def partial_checkpoints(request: Request):
 
 
 async def partial_datasets(request: Request):
+    """Dataset browser with sample thumbnails."""
     datasets = await _api("/datasets")
     if not datasets or (isinstance(datasets, dict) and "error" in datasets):
         return HTMLResponse(
-            '<div class="panel"><h3>Dataset Browser</h3><div class="empty">No datasets</div></div>'
+            '<div class="panel"><h3>Datasets</h3><div class="empty">No datasets</div></div>'
         )
 
     items = ""
     for ds in datasets:
+        name = ds["name"]
+        size = ds["size"]
+        shape = "x".join(str(d) for d in ds["image_shape"])
+        target_type = ds.get("target_type", "?")
         items += f"""
-        <div style="margin-bottom:8px;">
-            <span style="color:#f0f6fc;font-weight:600;">[{ds["name"]}]</span>
-            <span style="color:#8b949e;">{ds["size"]} images, {"x".join(str(d) for d in ds["image_shape"])}</span>
+        <div style="margin-bottom:10px;border-bottom:1px solid #21262d;padding-bottom:8px;">
+            <div style="display:flex;justify-content:space-between;">
+                <span style="color:#f0f6fc;font-weight:600;">{name}</span>
+                <span style="color:#8b949e;font-size:11px;">{size} images</span>
+            </div>
+            <div style="color:#8b949e;font-size:11px;">{shape} | target: {target_type}</div>
+            <div id="ds-samples-{name}" style="margin-top:4px;"
+                hx-get="/partial/dataset_samples/{name}"
+                hx-trigger="load"
+                hx-swap="innerHTML">
+            </div>
         </div>"""
 
     return HTMLResponse(
-        f'<div class="panel"><h3>Dataset Browser</h3>{items if items else "<div class=empty>No datasets</div>"}</div>'
+        f'<div class="panel"><h3>Datasets</h3>{items if items else "<div class=empty>No datasets</div>"}</div>'
     )
+
+
+async def partial_dataset_samples(request: Request):
+    """Sample thumbnails for a dataset."""
+    name = request.path_params["name"]
+    samples = await _api(f"/datasets/{name}/sample?n=8")
+    if samples and "images" in samples:
+        imgs = "".join(
+            f'<img src="data:image/png;base64,{b64}" style="width:32px;height:32px;image-rendering:pixelated;border:1px solid #30363d;">'
+            for b64 in samples["images"]
+        )
+        return HTMLResponse(f'<div style="display:flex;gap:2px;flex-wrap:wrap;">{imgs}</div>')
+    return HTMLResponse('<span style="color:#484f58;font-size:10px;">No samples</span>')
 
 
 async def partial_step(request: Request):
     job = await _api("/jobs/current")
     if job and isinstance(job, dict) and "current_step" in job:
         return HTMLResponse(f"[step: {job['current_step']}]")
-    # Check last completed job
     jobs = await _api("/jobs")
     if jobs and isinstance(jobs, list) and len(jobs) > 0:
         return HTMLResponse(f"[step: {jobs[0].get('current_step', '-')}]")
@@ -453,20 +781,22 @@ async def partial_step(request: Request):
 
 
 async def partial_health(request: Request):
-    """Connection health indicator — pings trainer /health endpoint."""
+    """Connection health indicator."""
     health = await _api("/health")
     connected = health and isinstance(health, dict) and health.get("status") == "ok"
 
     if connected:
         device = health.get("device", "?")
+        n_tasks = health.get("num_tasks", 0)
+        n_datasets = health.get("num_datasets", 0)
         return HTMLResponse(
             f'<span style="color:#7ee787;font-size:11px;">'
-            f"&#9679; {TRAINER_URL} ({device})</span>"
+            f"&#9679; {device} | {n_tasks}T {n_datasets}D</span>"
         )
     else:
         return HTMLResponse(
             f'<span style="color:#f85149;font-size:11px;">'
-            f"&#9679; Disconnected — {TRAINER_URL}</span>"
+            f"&#9679; Disconnected</span>"
         )
 
 
@@ -478,14 +808,12 @@ async def partial_recipe(request: Request):
     recipes = await _api("/recipes")
     current = await _api("/recipes/current")
 
-    # Is a recipe running?
     running = (
         current
         and isinstance(current, dict)
         and current.get("state") == "running"
     )
 
-    # Recipe options
     if not recipes or isinstance(recipes, dict):
         options = '<option value="">No recipes available</option>'
     else:
@@ -493,7 +821,6 @@ async def partial_recipe(request: Request):
         for r in recipes:
             options += f'<option value="{r["name"]}">{r["name"]}</option>'
 
-    # Phase progress display
     progress_html = ""
     if current and isinstance(current, dict) and current.get("recipe_name"):
         state = current.get("state", "unknown")
@@ -524,7 +851,6 @@ async def partial_recipe(request: Request):
         </div>
         """
 
-    # Run/stop buttons
     if running:
         buttons = """
         <button class="btn btn-danger" style="width:100%;"
@@ -542,8 +868,6 @@ async def partial_recipe(request: Request):
             hx-swap="innerHTML">Run Recipe</button>
         """
 
-    # Self-poll only when a recipe is running (to show progress updates)
-    # When idle, no polling — user can interact with the dropdown without it resetting
     poll_attr = 'hx-get="/partial/recipe" hx-trigger="every 2s" hx-target="#recipe-panel" hx-swap="innerHTML"' if running else ''
 
     return HTMLResponse(f"""
@@ -556,7 +880,7 @@ async def partial_recipe(request: Request):
 
 
 async def partial_checkpoints_tree(request: Request):
-    """Checkpoint tree visualization — replaces flat list."""
+    """Checkpoint tree visualization."""
     tree = await _api("/checkpoints/tree")
     if not tree or isinstance(tree, dict) and "error" in tree:
         return HTMLResponse(
@@ -571,8 +895,7 @@ async def partial_checkpoints_tree(request: Request):
             '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">No checkpoints saved</div></div>'
         )
 
-    # Build tree structure: group children by parent_id
-    children = {}  # parent_id -> [node, ...]
+    children = {}
     roots = []
     for n in nodes:
         pid = n.get("parent_id")
@@ -603,11 +926,11 @@ async def partial_checkpoints_tree(request: Request):
             <span class="tree-tag">{tag}</span>
             <span class="tree-meta">({short_id}){marker}</span>
             <span class="tree-actions">
-                <button class="btn" style="padding:1px 4px;font-size:10px;"
+                <button class="btn btn-sm"
                     hx-post="/action/load_checkpoint/{nid}"
                     hx-target="#checkpoints-panel"
                     hx-swap="innerHTML">Load</button>
-                <button class="btn" style="padding:1px 4px;font-size:10px;"
+                <button class="btn btn-sm"
                     hx-post="/action/fork_checkpoint/{nid}"
                     hx-target="#checkpoints-panel"
                     hx-swap="innerHTML">Fork</button>
@@ -660,7 +983,6 @@ async def partial_traversals(request: Request):
 
     groups_html = ""
     for factor_name, rows in data.items():
-        # Each row is a list of base64 PNGs
         n_cols = len(rows[0]) if rows else 0
         grid_items = ""
         for row in rows:
@@ -689,7 +1011,7 @@ async def partial_traversals(request: Request):
 
 
 async def partial_sort_by_factor(request: Request):
-    """Sort images by factor activation — lowest and highest."""
+    """Sort images by factor activation."""
     health = await _api("/health")
     if not health or not health.get("has_model"):
         return HTMLResponse(
@@ -758,7 +1080,6 @@ async def action_train(request: Request):
         "/train/start", method="POST", json_data={"steps": steps, "lr": lr_float}
     )
     if result and "id" in result:
-        # Return training panel with SSE connection script
         return HTMLResponse(f"""
         <div class="panel">
             <h3>Training</h3>
@@ -775,7 +1096,7 @@ async def action_train(request: Request):
                 <button class="btn"
                     hx-post="/action/save_checkpoint"
                     hx-target="#checkpoints-panel"
-                    hx-swap="innerHTML">Save Checkpoint</button>
+                    hx-swap="innerHTML">Save CP</button>
             </div>
             <div class="chart-container">
                 <canvas id="loss-chart"></canvas>
@@ -805,24 +1126,12 @@ async def action_stop(request: Request):
 
 
 async def action_eval(request: Request):
-    results = await _api("/eval/run", method="POST")
-    if not results or "error" in (results if isinstance(results, dict) else {}):
-        error = results.get("error", "Eval failed") if results else "Failed to connect"
-        return HTMLResponse(
-            f'<div class="panel"><h3>Eval Metrics</h3><div class="error">{error}</div></div>'
-        )
-
-    rows = ""
-    for task_name, metrics in results.items():
-        metric_str = "  ".join(f"{k} = {v:.4f}" for k, v in metrics.items())
-        rows += f'<div style="margin-bottom:4px;"><span style="color:#f0f6fc;">{task_name}:</span> <span class="metrics">{metric_str}</span></div>'
-
-    return HTMLResponse(f'<div class="panel"><h3>Eval Metrics</h3>{rows}</div>')
+    """Run eval and return the metrics table."""
+    return await partial_eval(request)
 
 
 async def action_save_checkpoint(request: Request):
-    result = await _api("/checkpoints/save", method="POST", json_data={"tag": "checkpoint"})
-    # Re-render checkpoints panel
+    await _api("/checkpoints/save", method="POST", json_data={"tag": "checkpoint"})
     return HTMLResponse(
         '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
     )
@@ -830,7 +1139,7 @@ async def action_save_checkpoint(request: Request):
 
 async def action_load_checkpoint(request: Request):
     cp_id = request.path_params["cp_id"]
-    result = await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
+    await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
     return HTMLResponse(
         '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
     )
@@ -839,13 +1148,120 @@ async def action_load_checkpoint(request: Request):
 async def action_toggle_task(request: Request):
     task_name = request.path_params["name"]
     await _api(f"/tasks/{task_name}/toggle", method="POST")
-    # Re-render tasks panel
     resp = await partial_tasks(request)
     return resp
 
 
+async def action_remove_task(request: Request):
+    task_name = request.path_params["name"]
+    await _api(f"/tasks/{task_name}/remove", method="POST")
+    resp = await partial_tasks(request)
+    return resp
+
+
+async def action_set_weight(request: Request):
+    task_name = request.path_params["name"]
+    form = await request.form()
+    weight = float(form.get("weight", 1.0))
+    await _api(f"/tasks/{task_name}/set_weight", method="POST", json_data={"weight": weight})
+    resp = await partial_tasks(request)
+    return resp
+
+
+async def action_add_task(request: Request):
+    """Add a task from the dashboard form."""
+    form = await request.form()
+    class_name = str(form.get("class_name", ""))
+    dataset_name = str(form.get("dataset_name", ""))
+    task_name = str(form.get("task_name", ""))
+    weight = float(form.get("weight", 1.0))
+    latent_slice = str(form.get("latent_slice", ""))
+
+    if not class_name or not dataset_name:
+        return HTMLResponse(
+            '<div class="panel"><h3>+ Task</h3><div class="error">Select a task class and dataset</div></div>'
+        )
+
+    # Auto-generate name if not provided
+    if not task_name:
+        task_name = f"{class_name.replace('Task', '').lower()}_{dataset_name}"
+
+    json_data = {
+        "class_name": class_name,
+        "name": task_name,
+        "dataset_name": dataset_name,
+        "weight": weight,
+    }
+    if latent_slice:
+        json_data["latent_slice"] = latent_slice
+
+    result = await _api("/tasks/add", method="POST", json_data=json_data)
+
+    if result and isinstance(result, dict) and "error" in result:
+        error = result["error"]
+        return HTMLResponse(
+            f'<div class="panel"><h3>+ Task</h3><div class="error">{error}</div></div>'
+        )
+
+    # Success — refresh both panels
+    return HTMLResponse("""
+    <div class="panel" hx-get="/partial/add_task" hx-trigger="load" hx-swap="innerHTML">
+        <h3>+ Task</h3><div style="color:#7ee787;">Task added!</div>
+    </div>
+    <script>htmx.trigger('#tasks-panel', 'refresh');</script>
+    """)
+
+
+async def action_generate_dataset(request: Request):
+    """Generate a dataset from the dashboard form."""
+    form = await request.form()
+    gen_name = str(form.get("generator_name", ""))
+
+    if not gen_name:
+        return HTMLResponse(
+            '<div class="panel"><h3>+ Dataset</h3><div class="error">Select a generator</div></div>'
+        )
+
+    # Collect param_ fields
+    params = {}
+    for key in form.keys():
+        if key.startswith("param_"):
+            pname = key[6:]  # strip "param_" prefix
+            val = str(form.get(key, ""))
+            # Try to parse as number
+            try:
+                params[pname] = int(val)
+            except ValueError:
+                try:
+                    params[pname] = float(val)
+                except ValueError:
+                    params[pname] = val
+
+    result = await _api("/generators/generate", method="POST", json_data={
+        "generator_name": gen_name,
+        "params": params,
+    })
+
+    if result and isinstance(result, dict) and "error" in result:
+        return HTMLResponse(
+            f'<div class="panel"><h3>+ Dataset</h3><div class="error">{result["error"]}</div></div>'
+        )
+
+    ds_name = result.get("name", "?") if result else "?"
+    ds_size = result.get("size", "?") if result else "?"
+    return HTMLResponse(f"""
+    <div class="panel" hx-get="/partial/generate" hx-trigger="load" hx-swap="innerHTML">
+        <h3>+ Dataset</h3>
+        <div style="color:#7ee787;">Generated {ds_name} ({ds_size} images)</div>
+    </div>
+    <script>
+        htmx.trigger('#datasets-panel', 'refresh');
+        htmx.trigger('#add-task-panel', 'refresh');
+    </script>
+    """)
+
+
 async def action_recipe_run(request: Request):
-    """Start a recipe by name."""
     form = await request.form()
     recipe_name = form.get("recipe-select", "")
     if not recipe_name:
@@ -857,14 +1273,12 @@ async def action_recipe_run(request: Request):
         return HTMLResponse(
             f'<div class="panel"><h3>Recipes</h3><div class="error">{result["error"]}</div></div>'
         )
-    # Return recipe panel that auto-refreshes to show progress
     return HTMLResponse(
         '<div hx-get="/partial/recipe" hx-trigger="load" hx-swap="innerHTML"></div>'
     )
 
 
 async def action_recipe_stop(request: Request):
-    """Stop the running recipe."""
     await _api("/recipes/stop", method="POST")
     return HTMLResponse(
         '<div hx-get="/partial/recipe" hx-trigger="load" hx-swap="innerHTML"></div>'
@@ -872,9 +1286,8 @@ async def action_recipe_stop(request: Request):
 
 
 async def action_fork_checkpoint(request: Request):
-    """Fork a checkpoint, creating a new branch in the tree."""
     cp_id = request.path_params["cp_id"]
-    result = await _api(
+    await _api(
         "/checkpoints/fork", method="POST",
         json_data={"id": cp_id, "new_tag": f"fork_{cp_id[:6]}"}
     )
@@ -908,7 +1321,7 @@ async def sse_job(request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-# ─── API Proxy for JS ───
+# ─── API Proxies for JS ───
 
 
 async def api_jobs_current(request: Request):
@@ -920,6 +1333,16 @@ async def api_jobs_current(request: Request):
     )
 
 
+async def api_jobs_loss_history(request: Request):
+    """Proxy for JS to fetch loss history for a job."""
+    job_id = request.path_params["job_id"]
+    data = await _api(f"/jobs/{job_id}/loss_history")
+    return HTMLResponse(
+        json.dumps(data),
+        media_type="application/json",
+    )
+
+
 # ─── App ───
 
 routes = [
@@ -927,16 +1350,20 @@ routes = [
     # Partials
     Route("/partial/model", partial_model),
     Route("/partial/tasks", partial_tasks),
+    Route("/partial/add_task", partial_add_task),
+    Route("/partial/generate", partial_generate),
     Route("/partial/training", partial_training),
     Route("/partial/reconstructions", partial_reconstructions),
     Route("/partial/eval", partial_eval),
     Route("/partial/checkpoints", partial_checkpoints),
     Route("/partial/datasets", partial_datasets),
+    Route("/partial/dataset_samples/{name}", partial_dataset_samples),
     Route("/partial/step", partial_step),
     Route("/partial/health", partial_health),
     Route("/partial/recipe", partial_recipe),
     Route("/partial/traversals", partial_traversals),
     Route("/partial/sort_by_factor", partial_sort_by_factor),
+    Route("/partial/jobs_history", partial_jobs_history),
     # Actions
     Route("/action/train", action_train, methods=["POST"]),
     Route("/action/stop", action_stop, methods=["POST"]),
@@ -945,11 +1372,16 @@ routes = [
     Route("/action/load_checkpoint/{cp_id}", action_load_checkpoint, methods=["POST"]),
     Route("/action/fork_checkpoint/{cp_id}", action_fork_checkpoint, methods=["POST"]),
     Route("/action/toggle_task/{name}", action_toggle_task, methods=["POST"]),
+    Route("/action/remove_task/{name}", action_remove_task, methods=["POST"]),
+    Route("/action/set_weight/{name}", action_set_weight, methods=["POST"]),
+    Route("/action/add_task", action_add_task, methods=["POST"]),
+    Route("/action/generate_dataset", action_generate_dataset, methods=["POST"]),
     Route("/action/recipe_run", action_recipe_run, methods=["POST"]),
     Route("/action/recipe_stop", action_recipe_stop, methods=["POST"]),
     # SSE + API proxy
     Route("/sse/job/{job_id}", sse_job),
     Route("/api/jobs/current", api_jobs_current),
+    Route("/api/jobs/{job_id}/loss_history", api_jobs_loss_history),
 ]
 
 app = Starlette(routes=routes)
