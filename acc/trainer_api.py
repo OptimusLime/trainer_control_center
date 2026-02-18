@@ -538,16 +538,21 @@ class TrainerAPI:
                 return JSONResponse({"error": "No model/trainer/checkpoint store"}, status_code=400)
             data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
-            cp = self.checkpoints.save(self.autoencoder, self.trainer, tag=tag)
-            # Persist loss summary from the most recent completed job
+            # Build metrics BEFORE save so they're persisted in the .pt file
+            metrics = {}
             recent_jobs = self.jobs.list()
             for j in recent_jobs:
                 if j.losses:
                     summaries = compute_loss_summary(j.losses)
-                    cp.metrics["loss_summary"] = {
+                    metrics["loss_summary"] = {
                         name: s.to_dict() for name, s in summaries.items()
                     }
                     break
+            cp = self.checkpoints.save(
+                self.autoencoder, self.trainer, tag=tag,
+                description="Manual save from dashboard",
+                metrics=metrics,
+            )
             return cp.to_dict()
 
         @app.post("/checkpoints/load")

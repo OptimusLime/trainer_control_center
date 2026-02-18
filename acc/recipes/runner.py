@@ -24,7 +24,7 @@ class RecipeRunner:
         if self._current_job is not None and self._current_job.state == "running":
             raise RuntimeError("A recipe is already running. Stop it first.")
 
-        ctx = RecipeContext(api)
+        ctx = RecipeContext(api, recipe)
         job = RecipeJob(
             id=uuid.uuid4().hex[:12],
             recipe_name=recipe.name,

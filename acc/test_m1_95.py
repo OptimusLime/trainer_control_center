@@ -174,7 +174,12 @@ def main():
 
     api = FakeAPI()
 
-    ctx = RecipeContext(api)
+    class DummyRecipe(Recipe):
+        name = "test_recipe"
+        description = "Test recipe for M1.95"
+        def run(self, ctx): pass
+
+    ctx = RecipeContext(api, DummyRecipe())
 
     # Create model
     ctx.create_model(lambda: FactorSlotAutoencoder(

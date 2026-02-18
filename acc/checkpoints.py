@@ -18,13 +18,28 @@ from acc.trainer import Trainer
 
 @dataclass
 class Checkpoint:
-    """Metadata for a saved checkpoint."""
+    """Metadata for a saved checkpoint.
+
+    Core fields (always present):
+        id, tag, parent_id, step, timestamp
+
+    Rich metadata (populated by recipes, may be empty for manual saves):
+        recipe_name:  Which recipe created this checkpoint
+        description:  Human-readable purpose (e.g. "20ch, no stop-grad, control branch")
+        model_config: Architectural config dict from model.config()
+        tasks_snapshot: List of {name, type, dataset, weight, latent_slice} at save time
+        metrics:      Loss summary, eval results, etc.
+    """
 
     id: str
     tag: str
     parent_id: Optional[str] = None
     step: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
+    recipe_name: Optional[str] = None
+    description: Optional[str] = None
+    model_config: dict = field(default_factory=dict)
+    tasks_snapshot: list = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -34,8 +49,30 @@ class Checkpoint:
             "parent_id": self.parent_id,
             "step": self.step,
             "timestamp": self.timestamp.isoformat(),
+            "recipe_name": self.recipe_name,
+            "description": self.description,
+            "model_config": self.model_config,
+            "tasks_snapshot": self.tasks_snapshot,
             "metrics": self.metrics,
         }
+
+
+def _snapshot_tasks(tasks: list) -> list[dict]:
+    """Capture current task configuration as serializable dicts."""
+    snapshot = []
+    for t in tasks:
+        info = {
+            "name": t.name,
+            "type": type(t).__name__,
+        }
+        if hasattr(t, "dataset") and t.dataset is not None:
+            info["dataset"] = t.dataset.name if hasattr(t.dataset, "name") else str(t.dataset)
+        if hasattr(t, "weight"):
+            info["weight"] = t.weight
+        if hasattr(t, "latent_slice") and t.latent_slice is not None:
+            info["latent_slice"] = list(t.latent_slice)
+        snapshot.append(info)
+    return snapshot
 
 
 class CheckpointStore:
@@ -57,6 +94,11 @@ class CheckpointStore:
         trainer: Trainer,
         tag: str,
         parent_id: Optional[str] = None,
+        recipe_name: Optional[str] = None,
+        description: Optional[str] = None,
+        model_config: Optional[dict] = None,
+        tasks_snapshot: Optional[list] = None,
+        metrics: Optional[dict] = None,
     ) -> Checkpoint:
         """Save a checkpoint to disk.
 
@@ -65,6 +107,11 @@ class CheckpointStore:
             trainer: The trainer (for optimizer + probe states).
             tag: Human-readable tag.
             parent_id: Parent checkpoint ID (for tree tracking).
+            recipe_name: Which recipe created this checkpoint.
+            description: Human-readable purpose of this checkpoint.
+            model_config: Model architectural config (from model.config()).
+            tasks_snapshot: List of task configs at save time.
+            metrics: Pre-computed metrics (loss_summary, eval results).
 
         Returns:
             The Checkpoint metadata.
@@ -80,14 +127,27 @@ class CheckpointStore:
                     step = group["step"]
                     break
 
+        # Extract model config if not provided and model supports it
+        if model_config is None and hasattr(autoencoder, "config"):
+            model_config = autoencoder.config()
+
+        # Snapshot current tasks if not provided
+        if tasks_snapshot is None:
+            tasks_snapshot = _snapshot_tasks(trainer.tasks)
+
         checkpoint = Checkpoint(
             id=cp_id,
             tag=tag,
             parent_id=parent_id or self._current_id,
             step=step,
+            recipe_name=recipe_name,
+            description=description,
+            model_config=model_config or {},
+            tasks_snapshot=tasks_snapshot or [],
+            metrics=metrics or {},
         )
 
-        # Save full state to disk
+        # Save full state to disk — metadata is complete BEFORE torch.save
         state = {
             "trainer_state": trainer.state_dict(),
             "checkpoint_meta": checkpoint.to_dict(),

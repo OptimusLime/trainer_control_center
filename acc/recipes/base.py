@@ -38,8 +38,9 @@ class RecipeContext:
     Recipes call these methods to build the checkpoint tree.
     """
 
-    def __init__(self, api: "TrainerAPI"):  # noqa: F821 — forward ref
+    def __init__(self, api: "TrainerAPI", recipe: Recipe):  # noqa: F821 — forward ref
         self._api = api
+        self._recipe = recipe
         self._phase = "initializing"
         self._phases_completed: list[str] = []
         self._checkpoints_created: list[str] = []
@@ -97,13 +98,18 @@ class RecipeContext:
         self._api.tasks.clear()
         self._api.trainer = None
 
-    def save_checkpoint(self, tag: str, parent_id: Optional[str] = None) -> str:
-        """Save current state, return checkpoint_id. Persists loss summary from most recent job.
+    def save_checkpoint(self, tag: str, parent_id: Optional[str] = None,
+                        description: Optional[str] = None) -> str:
+        """Save current state, return checkpoint_id.
+
+        Recipe name, model config, task snapshot, and loss summary are all
+        persisted IN the .pt file so the checkpoint is self-describing.
 
         Args:
             tag: Human-readable tag for the checkpoint.
             parent_id: Explicit parent checkpoint ID. If None, uses the
                 checkpoint store's current lineage (last saved/loaded).
+            description: Human-readable purpose of this checkpoint.
         """
         if self._api.autoencoder is None:
             raise RuntimeError("No model to checkpoint.")
@@ -111,19 +117,28 @@ class RecipeContext:
         if self._api.checkpoints is None:
             from acc.checkpoints import CheckpointStore
             self._api.checkpoints = CheckpointStore("./acc/checkpoints_data")
-        cp = self._api.checkpoints.save(
-            self._api.autoencoder, self._api.trainer, tag=tag, parent_id=parent_id,
-        )
-        # Persist loss summary from most recent job
+
+        # Build metrics (loss summary) BEFORE save so it's in the .pt file
+        metrics = {}
         from acc.loss_health import compute_loss_summary
         recent_jobs = self._api.jobs.list()
         for j in recent_jobs:
             if j.losses:
                 summaries = compute_loss_summary(j.losses)
-                cp.metrics["loss_summary"] = {
+                metrics["loss_summary"] = {
                     name: s.to_dict() for name, s in summaries.items()
                 }
                 break
+
+        cp = self._api.checkpoints.save(
+            self._api.autoencoder,
+            self._api.trainer,
+            tag=tag,
+            parent_id=parent_id,
+            recipe_name=self._recipe.name,
+            description=description or self._phase,
+            metrics=metrics,
+        )
         self._checkpoints_created.append(cp.id)
         return cp.id
 

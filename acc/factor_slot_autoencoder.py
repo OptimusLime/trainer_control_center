@@ -42,6 +42,12 @@ class FactorSlotAutoencoder(nn.Module):
         backbone_channels: Channel progression for the CNN backbone.
         embed_dim: Shared embedding dimension for cross-attention.
         image_size: Expected input image size (for computing spatial dims).
+        detach_factor_grad: If True, detach factor slices before feeding to
+            the decoder's cross-attention (FactorEmbedder). This blocks
+            reconstruction gradients from flowing back into the factor
+            channels, so only probe/task gradients shape what those channels
+            encode. The decoder still READS factor tokens as context, but
+            can't corrupt them into reconstruction-optimal representations.
     """
 
     def __init__(
@@ -52,6 +58,7 @@ class FactorSlotAutoencoder(nn.Module):
         embed_dim: int = 64,
         image_size: int = 32,
         use_cross_attention: bool = True,
+        detach_factor_grad: bool = False,
     ):
         super().__init__()
 
@@ -64,11 +71,14 @@ class FactorSlotAutoencoder(nn.Module):
 
         self.factor_groups = factor_groups
         self.use_cross_attention = use_cross_attention
+        self.detach_factor_grad = detach_factor_grad
         # latent_channels = sum of factor group dims (channel-wise)
         self.latent_channels = sum(fg.latent_dim for fg in factor_groups)
         validate_factor_groups(factor_groups, self.latent_channels)
 
         self._in_channels = in_channels
+        self._image_size = image_size
+        self._backbone_channels = list(backbone_channels)
         self.embed_dim = embed_dim
 
         # Spatial size after backbone
@@ -139,6 +149,28 @@ class FactorSlotAutoencoder(nn.Module):
     def latent_dim(self) -> int:
         return self.total_latent_dim
 
+    def config(self) -> dict:
+        """Return architectural config as a serializable dict.
+
+        Used by CheckpointStore.save() to persist model config alongside
+        weights so you can understand what a checkpoint contains without
+        needing the recipe source code.
+        """
+        return {
+            "class": type(self).__name__,
+            "in_channels": self._in_channels,
+            "latent_channels": self.latent_channels,
+            "image_size": self._image_size,
+            "backbone_channels": self._backbone_channels,
+            "embed_dim": self.embed_dim,
+            "use_cross_attention": self.use_cross_attention,
+            "detach_factor_grad": self.detach_factor_grad,
+            "factor_groups": [
+                {"name": fg.name, "start": fg.latent_start, "end": fg.latent_end, "dim": fg.latent_dim}
+                for fg in self.factor_groups
+            ],
+        }
+
     def _reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
@@ -182,8 +214,16 @@ class FactorSlotAutoencoder(nn.Module):
         # Per-factor slices (channel groups, spatially pooled)
         factor_slices = self._extract_factor_slices(z_spatial)
 
-        # Factor embeddings for cross-attention
-        factor_embeds = self.factor_embedder(factor_slices)  # (B, N, D)
+        # Factor embeddings for cross-attention.
+        # When detach_factor_grad is True, we detach factor slices before
+        # feeding to the decoder's FactorEmbedder. This blocks reconstruction
+        # gradients from corrupting factor channels — only probe/task
+        # gradients shape what those channels encode.
+        if self.detach_factor_grad:
+            decoder_slices = {k: v.detach() for k, v in factor_slices.items()}
+        else:
+            decoder_slices = factor_slices
+        factor_embeds = self.factor_embedder(decoder_slices)  # (B, N, D)
 
         # Decode from spatial latent
         h = self.decoder_input(z_spatial)  # (B, decoder_ch, h, w)

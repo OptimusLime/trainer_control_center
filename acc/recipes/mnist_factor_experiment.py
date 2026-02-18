@@ -1,26 +1,30 @@
-"""MNIST Factor Experiment — no-free vs with-free factor groups.
+"""MNIST Factor Experiment — stop-gradient isolation for factor disentanglement.
 
-Branch 0 (vanilla_vae): Standard ConvVAE baseline. Recon + KL only.
+Previous experiment showed that reconstruction gradients flowing through
+cross-attention overwhelm the factor probe gradients, corrupting named
+factor channels into reconstruction-optimal representations. Traversals
+show no visible thickness/slant variation even with no free channels.
 
-Branch 1 (mnist_only): FactorSlotAutoencoder (with free group) on MNIST only.
-  Recon + KL + digit classification. No factor supervision.
+This experiment tests whether detaching factor slices from the decoder's
+cross-attention path forces real disentanglement:
 
-Branch 2 (curriculum_free): FactorSlot WITH free group + full curriculum.
-  digit + thickness + slant + 12 free channels.  Uniform task sampling.
+Branch 0 (baseline_nofree): Re-run of curriculum_nofree (20ch, no detach).
+  Control branch to compare against on same random seed.
 
-Branch 3 (curriculum_nofree): FactorSlot WITHOUT free group + full curriculum.
-  digit + thickness + slant only — 20 channels total. Every channel must
-  serve a named factor. Forces the model to actually encode thickness in
-  the thickness channels and slant in the slant channels, instead of
-  dumping everything into free.
+Branch 1 (stopgrad_20ch): Same 20ch no-free config, but with
+  detach_factor_grad=True. Reconstruction gradients can't flow back
+  through cross-attention tokens to corrupt factor channels.
 
-All curriculum branches use uniform task sampling (random.choices, equal weights).
+Branch 2 (stopgrad_half): 10ch total (4 digit, 3 thickness, 3 slant),
+  detach_factor_grad=True. Half the capacity with gradient isolation.
+  Tests whether extreme compression + stop-grad forces stronger encoding.
+
+All branches use uniform task sampling and the same training schedule.
 """
 
 from acc.recipes.base import Recipe, RecipeContext
 from acc.factor_group import FactorGroup
 from acc.factor_slot_autoencoder import FactorSlotAutoencoder
-from acc.conv_vae import ConvVAE
 from acc.dataset import load_mnist
 from acc.generators.thickness import generate_thickness
 from acc.generators.slant import generate_slant
@@ -30,53 +34,52 @@ from acc.tasks.kl_divergence import KLDivergenceTask
 from acc.tasks.regression import RegressionTask
 
 
-# WITH free group: 32 channels, 8x8 spatial → 2048 flat latent dims
-FACTOR_GROUPS_FREE = [
-    FactorGroup("digit", 0, 8),          # 8 channels
-    FactorGroup("thickness", 8, 14),     # 6 channels
-    FactorGroup("slant", 14, 20),        # 6 channels
-    FactorGroup("free", 20, 32),         # 12 channels
-]
-
-# WITHOUT free group: 20 channels, 8x8 spatial → 1280 flat latent dims
-# Every channel belongs to a supervised factor.
+# 20 channels, no free group (same as previous experiment)
 FACTOR_GROUPS_NOFREE = [
     FactorGroup("digit", 0, 8),          # 8 channels
     FactorGroup("thickness", 8, 14),     # 6 channels
     FactorGroup("slant", 14, 20),        # 6 channels
 ]
 
+# 10 channels, no free group, half capacity
+FACTOR_GROUPS_HALF = [
+    FactorGroup("digit", 0, 4),          # 4 channels
+    FactorGroup("thickness", 4, 7),      # 3 channels
+    FactorGroup("slant", 7, 10),         # 3 channels
+]
+
 BATCHES_PER_EPOCH = 937  # 60k / 64
-
-# Total gradient steps per branch.
 TOTAL_STEPS = BATCHES_PER_EPOCH * 3 * 10  # 28,110
-
-# KL annealing warmup (in KL-task calls, not total steps).
 KL_WARMUP_STEPS = 1000
 
 
-def _build_factor_model_free() -> FactorSlotAutoencoder:
-    return FactorSlotAutoencoder(
-        in_channels=1,
-        factor_groups=FACTOR_GROUPS_FREE,
-        image_size=32,
-    )
-
-
-def _build_factor_model_nofree() -> FactorSlotAutoencoder:
+def _build_nofree() -> FactorSlotAutoencoder:
+    """20ch, no free group, no detach (baseline control)."""
     return FactorSlotAutoencoder(
         in_channels=1,
         factor_groups=FACTOR_GROUPS_NOFREE,
         image_size=32,
+        detach_factor_grad=False,
     )
 
 
-def _build_vanilla_vae() -> ConvVAE:
-    return ConvVAE(
+def _build_stopgrad_20ch() -> FactorSlotAutoencoder:
+    """20ch, no free group, with detach_factor_grad."""
+    return FactorSlotAutoencoder(
         in_channels=1,
-        latent_dim=128,
+        factor_groups=FACTOR_GROUPS_NOFREE,
         image_size=32,
-        base_channels=32,
+        detach_factor_grad=True,
+    )
+
+
+def _build_stopgrad_half() -> FactorSlotAutoencoder:
+    """10ch, no free group, with detach_factor_grad."""
+    return FactorSlotAutoencoder(
+        in_channels=1,
+        factor_groups=FACTOR_GROUPS_HALF,
+        image_size=32,
+        detach_factor_grad=True,
     )
 
 
@@ -101,8 +104,8 @@ def _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds):
 class MNISTFactorExperiment(Recipe):
     name = "mnist_factor_experiment"
     description = (
-        "No-free vs with-free factor groups: does removing the free "
-        "channel group force real disentanglement?"
+        "Stop-gradient isolation: does detaching factor slices from "
+        "decoder cross-attention force real disentanglement in traversals?"
     )
 
     def run(self, ctx: RecipeContext) -> None:
@@ -119,90 +122,85 @@ class MNISTFactorExperiment(Recipe):
         )
 
         # ============================================================
-        # Branch 0: VANILLA VAE BASELINE
+        # Branch 0: BASELINE — 20ch no-free, NO detach (control)
         # ============================================================
-        ctx.phase = "Build vanilla ConvVAE"
-        ctx.create_model(_build_vanilla_vae)
-        ctx.save_checkpoint("vanilla_root")
-
-        ctx.detach_all_tasks()
-        ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask("kl", mnist, weight=0.5))
-
-        ctx.phase = f"Train vanilla ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint("vanilla_trained")
-
-        ctx.phase = "Eval vanilla"
-        m_vanilla = ctx.evaluate()
-        ctx.log(f"vanilla: {m_vanilla}")
-
-        # ============================================================
-        # Branch 1: FACTOR-SLOT, MNIST ONLY (with free group)
-        # ============================================================
-        ctx.phase = "Build FactorSlot (with free)"
-        ctx.create_model(_build_factor_model_free)
-        factor_root_free = ctx.save_checkpoint("factor_root_free")
-
-        ctx.phase = "Fork -> mnist_only"
-        ctx.fork(factor_root_free, "mnist_only")
-        ctx.detach_all_tasks()
-        ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask(
-            "kl", mnist, weight=0.5, warmup_steps=KL_WARMUP_STEPS,
-        ))
-        ctx.attach_task(
-            ClassificationTask("digit_classify", mnist, factor_name="digit")
+        ctx.phase = "Build baseline (20ch, no detach)"
+        ctx.create_model(_build_nofree)
+        root_nofree = ctx.save_checkpoint(
+            "baseline_nofree_root",
+            description="CONTROL: 20ch, no stop-grad, untrained",
         )
 
-        ctx.phase = f"Train mnist_only ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint("mnist_only_trained")
-
-        ctx.phase = "Eval mnist_only"
-        m_mnist = ctx.evaluate()
-        ctx.log(f"mnist_only: {m_mnist}")
-
-        # ============================================================
-        # Branch 2: CURRICULUM WITH FREE GROUP (32ch)
-        # ============================================================
-        ctx.phase = "Fork -> curriculum_free"
-        ctx.fork(factor_root_free, "curriculum_free")
+        ctx.phase = "Fork -> baseline_nofree"
+        ctx.fork(root_nofree, "baseline_nofree")
         _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
 
-        ctx.phase = f"Train curriculum_free ({TOTAL_STEPS} steps)"
+        ctx.phase = f"Train baseline_nofree ({TOTAL_STEPS} steps)"
         ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint("curriculum_free_trained")
+        ctx.save_checkpoint(
+            "baseline_nofree_trained",
+            description=f"CONTROL: 20ch, no stop-grad, trained {TOTAL_STEPS} steps",
+        )
 
-        ctx.phase = "Eval curriculum_free"
-        m_free = ctx.evaluate()
-        ctx.log(f"curriculum_free: {m_free}")
+        ctx.phase = "Eval baseline_nofree"
+        m_baseline = ctx.evaluate()
+        ctx.log(f"baseline_nofree: {m_baseline}")
 
         # ============================================================
-        # Branch 3: CURRICULUM WITHOUT FREE GROUP (20ch)
+        # Branch 1: STOP-GRAD 20ch — same arch, detach_factor_grad=True
         # ============================================================
-        ctx.phase = "Build FactorSlot (no free)"
-        ctx.create_model(_build_factor_model_nofree)
-        factor_root_nofree = ctx.save_checkpoint("factor_root_nofree")
+        ctx.phase = "Build stopgrad_20ch"
+        ctx.create_model(_build_stopgrad_20ch)
+        root_sg20 = ctx.save_checkpoint(
+            "stopgrad_20ch_root",
+            description="EXPERIMENT: 20ch, stop-grad ON, untrained",
+        )
 
-        ctx.phase = "Fork -> curriculum_nofree"
-        ctx.fork(factor_root_nofree, "curriculum_nofree")
+        ctx.phase = "Fork -> stopgrad_20ch"
+        ctx.fork(root_sg20, "stopgrad_20ch")
         _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
 
-        ctx.phase = f"Train curriculum_nofree ({TOTAL_STEPS} steps)"
+        ctx.phase = f"Train stopgrad_20ch ({TOTAL_STEPS} steps)"
         ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint("curriculum_nofree_trained")
+        ctx.save_checkpoint(
+            "stopgrad_20ch_trained",
+            description=f"EXPERIMENT: 20ch, stop-grad ON, trained {TOTAL_STEPS} steps",
+        )
 
-        ctx.phase = "Eval curriculum_nofree"
-        m_nofree = ctx.evaluate()
-        ctx.log(f"curriculum_nofree: {m_nofree}")
+        ctx.phase = "Eval stopgrad_20ch"
+        m_sg20 = ctx.evaluate()
+        ctx.log(f"stopgrad_20ch: {m_sg20}")
+
+        # ============================================================
+        # Branch 2: STOP-GRAD HALF — 10ch, detach_factor_grad=True
+        # ============================================================
+        ctx.phase = "Build stopgrad_half (10ch)"
+        ctx.create_model(_build_stopgrad_half)
+        root_sghalf = ctx.save_checkpoint(
+            "stopgrad_half_root",
+            description="EXPERIMENT: 10ch, stop-grad ON, half capacity, untrained",
+        )
+
+        ctx.phase = "Fork -> stopgrad_half"
+        ctx.fork(root_sghalf, "stopgrad_half")
+        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+
+        ctx.phase = f"Train stopgrad_half ({TOTAL_STEPS} steps)"
+        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+        ctx.save_checkpoint(
+            "stopgrad_half_trained",
+            description=f"EXPERIMENT: 10ch, stop-grad ON, half capacity, trained {TOTAL_STEPS} steps",
+        )
+
+        ctx.phase = "Eval stopgrad_half"
+        m_sghalf = ctx.evaluate()
+        ctx.log(f"stopgrad_half: {m_sghalf}")
 
         # ============================================================
         # Summary
         # ============================================================
         ctx.phase = "Complete"
-        ctx.log(f"COMPARISON @ {TOTAL_STEPS} steps, uniform sampling:")
-        ctx.log(f"  vanilla:          {m_vanilla}")
-        ctx.log(f"  mnist_only:       {m_mnist}")
-        ctx.log(f"  curriculum_free:  {m_free}")
-        ctx.log(f"  curriculum_nofree:{m_nofree}")
+        ctx.log(f"STOP-GRAD COMPARISON @ {TOTAL_STEPS} steps, uniform sampling:")
+        ctx.log(f"  baseline_nofree (20ch, no detach): {m_baseline}")
+        ctx.log(f"  stopgrad_20ch   (20ch, detach):    {m_sg20}")
+        ctx.log(f"  stopgrad_half   (10ch, detach):    {m_sghalf}")
