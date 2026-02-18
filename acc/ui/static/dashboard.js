@@ -174,12 +174,8 @@ function startSSE(jobId) {
             eventSource.close();
             // Load final loss summary for the completed job
             loadLossSummary(jobId);
-            // Refresh panels after training completes
-            htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
-            htmx.ajax('GET', '/partial/eval', {target: '#eval-panel', swap: 'innerHTML'});
-            htmx.ajax('GET', '/partial/reconstructions', {target: '#recon-panel', swap: 'innerHTML'});
-            htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});
-            htmx.ajax('GET', '/partial/jobs_history', {target: '#jobs-panel', swap: 'innerHTML'});
+            // Fire training-done event — all panels with hx-trigger="training-done from:body" auto-refresh
+            htmx.trigger(document.body, 'training-done');
             return;
         }
         addLossPoint(data.step, data.task_name, data.task_loss, data.health || null);

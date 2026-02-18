@@ -20,6 +20,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.requests import Request
 
 from acc.ui import components as C
+from acc.ui import events as E
 from acc.ui.state import DashboardState, get_state
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -59,7 +60,7 @@ def _page(title: str, body: str) -> str:
     <div class="header">
         <h1>ACC -- Autoencoder Control Center</h1>
         <div style="display:flex;align-items:center;gap:12px;">
-            <span id="checkpoint-indicator" hx-get="/partial/checkpoint_indicator" hx-trigger="load, every 3s" style="font-weight:600;"></span>
+            <span id="checkpoint-indicator" hx-get="/partial/checkpoint_indicator" hx-trigger="load, every 3s, checkpoint-changed from:body" style="font-weight:600;"></span>
             <span id="trainer-status" hx-get="/partial/health" hx-trigger="load, every 3s"></span>
             <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 2s">[step: -]</span>
         </div>
@@ -82,19 +83,19 @@ def _sidebar_placeholder() -> str:
         <div id="recipe-panel" hx-get="/partial/recipe" hx-trigger="load">
             <div class="panel"><h3>Recipes</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 5s">
+        <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 5s, checkpoint-changed from:body, model-changed from:body">
             <div class="panel"><h3>Model</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="tasks-panel" hx-get="/partial/tasks" hx-trigger="load, every 3s">
+        <div id="tasks-panel" hx-get="/partial/tasks" hx-trigger="load, every 3s, checkpoint-changed from:body, tasks-changed from:body">
             <div class="panel"><h3>Tasks</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="add-task-panel" hx-get="/partial/add_task" hx-trigger="load, every 5s">
+        <div id="add-task-panel" hx-get="/partial/add_task" hx-trigger="load, every 5s, tasks-changed from:body, datasets-changed from:body">
             <div class="panel"><h3>+ Task</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="generate-panel" hx-get="/partial/generate" hx-trigger="load, every 5s">
+        <div id="generate-panel" hx-get="/partial/generate" hx-trigger="load, every 5s, datasets-changed from:body">
             <div class="panel"><h3>+ Dataset</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 5s">
+        <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 5s, checkpoint-changed from:body">
             <div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Loading...</div></div>
         </div>
     """
@@ -102,28 +103,28 @@ def _sidebar_placeholder() -> str:
 
 def _main_placeholder() -> str:
     return """
-        <div id="training-panel" hx-get="/partial/training" hx-trigger="load">
+        <div id="training-panel" hx-get="/partial/training" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Training</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 10s">
+        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 10s, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Reconstructions</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load">
+        <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load, checkpoint-changed from:body, training-done from:body, tasks-changed from:body">
             <div class="panel"><h3>Eval Metrics</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="jobs-panel" hx-get="/partial/jobs_history" hx-trigger="load, every 5s">
+        <div id="jobs-panel" hx-get="/partial/jobs_history" hx-trigger="load, every 5s, training-done from:body">
             <div class="panel"><h3>Job History</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="traversal-panel" hx-get="/partial/traversals" hx-trigger="load">
+        <div id="traversal-panel" hx-get="/partial/traversals" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Latent Traversals</h3><div class="empty">Run eval to generate</div></div>
         </div>
-        <div id="sort-panel" hx-get="/partial/sort_by_factor" hx-trigger="load">
+        <div id="sort-panel" hx-get="/partial/sort_by_factor" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Sort by Factor</h3><div class="empty">Run eval to generate</div></div>
         </div>
-        <div id="attention-panel" hx-get="/partial/attention_maps" hx-trigger="load">
+        <div id="attention-panel" hx-get="/partial/attention_maps" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Attention Maps</h3><div class="empty">Run eval to generate</div></div>
         </div>
-        <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s">
+        <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s, datasets-changed from:body">
             <div class="panel"><h3>Datasets</h3><div class="empty">Loading...</div></div>
         </div>
     """
@@ -1235,7 +1236,8 @@ async def action_eval_compare(request: Request):
 async def action_save_checkpoint(request: Request):
     await _api("/checkpoints/save", method="POST", json_data={"tag": "checkpoint"})
     return HTMLResponse(
-        '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
+        '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Saving...</div></div>',
+        headers={"HX-Trigger": E.CHECKPOINT_CHANGED},
     )
 
 
@@ -1244,25 +1246,18 @@ async def action_load_checkpoint(request: Request):
     result = await _api("/checkpoints/load", method="POST", json_data={"id": cp_id})
     if result and isinstance(result, dict) and result.get("error"):
         return HTMLResponse(f'<div class="error">{result["error"]}</div>')
-    # Refresh all panels — loaded checkpoint changes model weights, affects everything
-    return HTMLResponse("""
-    <div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>
-    <script>
-        htmx.ajax('GET', '/partial/model', {target: '#model-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/reconstructions', {target: '#recon-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/eval', {target: '#eval-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/traversals', {target: '#traversal-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/sort_by_factor', {target: '#sort-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
-    </script>
-    """)
+    # HX-Trigger fires checkpoint-changed → all panels with that hx-trigger auto-refresh
+    return HTMLResponse(
+        '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Loading checkpoint...</div></div>',
+        headers={"HX-Trigger": E.CHECKPOINT_CHANGED},
+    )
 
 
 async def action_toggle_task(request: Request):
     task_name = request.path_params["name"]
     await _api(f"/tasks/{task_name}/toggle", method="POST")
     resp = await partial_tasks(request)
+    resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
 
 
@@ -1270,6 +1265,7 @@ async def action_remove_task(request: Request):
     task_name = request.path_params["name"]
     await _api(f"/tasks/{task_name}/remove", method="POST")
     resp = await partial_tasks(request)
+    resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
 
 
@@ -1279,6 +1275,7 @@ async def action_set_weight(request: Request):
     weight = float(form.get("weight", 1.0))
     await _api(f"/tasks/{task_name}/set_weight", method="POST", json_data={"weight": weight})
     resp = await partial_tasks(request)
+    resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
 
 
@@ -1317,13 +1314,11 @@ async def action_add_task(request: Request):
             f'<div class="panel"><h3>+ Task</h3><div class="error">{error}</div></div>'
         )
 
-    # Success — refresh both panels
-    return HTMLResponse("""
-    <div class="panel" hx-get="/partial/add_task" hx-trigger="load" hx-swap="innerHTML">
-        <h3>+ Task</h3><div style="color:#7ee787;">Task added!</div>
-    </div>
-    <script>htmx.ajax('GET', '/partial/tasks', {target: '#tasks-panel', swap: 'innerHTML'});</script>
-    """)
+    # Success — HX-Trigger fires tasks-changed → tasks panel + add-task panel auto-refresh
+    return HTMLResponse(
+        '<div class="panel"><h3>+ Task</h3><div style="color:#7ee787;">Task added!</div></div>',
+        headers={"HX-Trigger": E.TASKS_CHANGED},
+    )
 
 
 async def action_generate_dataset(request: Request):
@@ -1363,16 +1358,11 @@ async def action_generate_dataset(request: Request):
 
     ds_name = result.get("name", "?") if result else "?"
     ds_size = result.get("size", "?") if result else "?"
-    return HTMLResponse(f"""
-    <div class="panel" hx-get="/partial/generate" hx-trigger="load" hx-swap="innerHTML">
-        <h3>+ Dataset</h3>
-        <div style="color:#7ee787;">Generated {ds_name} ({ds_size} images)</div>
-    </div>
-    <script>
-        htmx.ajax('GET', '/partial/datasets', {target: '#datasets-panel', swap: 'innerHTML'});
-        htmx.ajax('GET', '/partial/add_task', {target: '#add-task-panel', swap: 'innerHTML'});
-    </script>
-    """)
+    # HX-Trigger fires datasets-changed → datasets panel + add-task panel auto-refresh
+    return HTMLResponse(
+        f'<div class="panel"><h3>+ Dataset</h3><div style="color:#7ee787;">Generated {ds_name} ({ds_size} images)</div></div>',
+        headers={"HX-Trigger": E.DATASETS_CHANGED},
+    )
 
 
 async def action_recipe_run(request: Request):
@@ -1406,7 +1396,8 @@ async def action_fork_checkpoint(request: Request):
         json_data={"id": cp_id, "new_tag": f"fork_{cp_id[:6]}"}
     )
     return HTMLResponse(
-        '<div hx-get="/partial/checkpoints" hx-trigger="load" hx-swap="innerHTML"></div>'
+        '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Forking...</div></div>',
+        headers={"HX-Trigger": E.CHECKPOINT_CHANGED},
     )
 
 
