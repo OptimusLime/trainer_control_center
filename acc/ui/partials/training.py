@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error
 from acc.ui import components as C
 
 
@@ -33,7 +33,7 @@ async def partial_training(request: Request):
     summary_data = None
     if recent_job_id:
         summary_data = await _api(f"/jobs/{recent_job_id}/loss_summary")
-        if not (summary_data and isinstance(summary_data, dict) and "error" not in summary_data):
+        if is_error(summary_data):
             summary_data = None
 
     summary_html = C.loss_summary_table(summary_data)

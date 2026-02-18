@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, invalidate_all
 from acc.ui import components as C
 
 

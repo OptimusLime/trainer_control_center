@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error
 from acc.ui import components as C
 
 
@@ -35,7 +35,7 @@ async def partial_checkpoints(request: Request):
 async def partial_checkpoints_tree(request: Request):
     """Checkpoint tree visualization."""
     tree = await _api("/checkpoints/tree")
-    if not tree or isinstance(tree, dict) and "error" in tree:
+    if not tree or is_error(tree):
         return HTMLResponse(
             '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">No checkpoints</div></div>'
         )

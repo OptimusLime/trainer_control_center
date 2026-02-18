@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error
 from acc.ui import components as C
 
 
@@ -46,7 +46,7 @@ async def partial_reconstructions(request: Request):
         return HTMLResponse(C.no_model_guard("Reconstructions"))
 
     data = await _api("/eval/reconstructions", method="POST", json_data={"n": 8})
-    if not data or "error" in (data if isinstance(data, dict) else {}):
+    if not data or is_error(data):
         # Fallback: show samples only
         datasets = await _api("/datasets")
         if datasets and isinstance(datasets, list) and len(datasets) > 0:
@@ -101,7 +101,7 @@ async def partial_eval(request: Request):
         return HTMLResponse(C.no_model_guard("Eval Metrics"))
 
     results = await _api("/eval/run", method="POST")
-    if not results or "error" in (results if isinstance(results, dict) else {}):
+    if not results or is_error(results):
         cp_selector = await _checkpoint_selector_html()
         return HTMLResponse(f"""
         <div class="panel">
@@ -161,13 +161,13 @@ async def partial_eval_compare(request: Request):
         return HTMLResponse(C.no_model_guard("Eval Metrics"))
 
     base_results = await _api("/eval/run", method="POST")
-    if not base_results or "error" in (base_results if isinstance(base_results, dict) else {}):
+    if not base_results or is_error(base_results):
         return HTMLResponse(
             '<div class="panel"><h3>Eval Metrics</h3><div class="error">Base eval failed</div></div>'
         )
 
     compare_data = await _api("/eval/checkpoint", method="POST", json_data={"checkpoint_id": compare_cp_id})
-    if not compare_data or "error" in (compare_data if isinstance(compare_data, dict) else {}):
+    if not compare_data or is_error(compare_data):
         error_msg = compare_data.get("error", "Unknown error") if isinstance(compare_data, dict) else "Failed"
         return HTMLResponse(
             f'<div class="panel"><h3>Eval Metrics</h3><div class="error">Comparison eval failed: {error_msg}</div></div>'
@@ -250,7 +250,7 @@ async def partial_traversals(request: Request):
         return HTMLResponse(C.no_model_guard("Latent Traversals"))
 
     data = await _api("/eval/traversals?n_seeds=5&n_steps=9")
-    if not data or (isinstance(data, dict) and "error" in data):
+    if not data or is_error(data):
         error = data.get("error", "") if isinstance(data, dict) else ""
         return HTMLResponse(f"""
         <div class="panel">
@@ -299,7 +299,7 @@ async def partial_sort_by_factor(request: Request):
         return HTMLResponse(C.no_model_guard("Sort by Factor"))
 
     data = await _api("/eval/sort_by_factor?n_show=16")
-    if not data or (isinstance(data, dict) and "error" in data):
+    if not data or is_error(data):
         error = data.get("error", "") if isinstance(data, dict) else ""
         return HTMLResponse(f"""
         <div class="panel">
@@ -351,7 +351,7 @@ async def partial_attention_maps(request: Request):
         return HTMLResponse(C.no_model_guard("Attention Maps"))
 
     data = await _api("/eval/attention_maps?n_images=4")
-    if not data or (isinstance(data, dict) and "error" in data):
+    if not data or is_error(data):
         error = data.get("error", "") if isinstance(data, dict) else ""
         return HTMLResponse(f"""
         <div class="panel">

@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error, invalidate_all
 from acc.ui import events as E
 from acc.ui.partials.model import partial_tasks
 
@@ -11,6 +11,7 @@ from acc.ui.partials.model import partial_tasks
 async def action_toggle_task(request: Request):
     task_name = request.path_params["name"]
     await _api(f"/tasks/{task_name}/toggle", method="POST")
+    invalidate_all()
     resp = await partial_tasks(request)
     resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
@@ -19,6 +20,7 @@ async def action_toggle_task(request: Request):
 async def action_remove_task(request: Request):
     task_name = request.path_params["name"]
     await _api(f"/tasks/{task_name}/remove", method="POST")
+    invalidate_all()
     resp = await partial_tasks(request)
     resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
@@ -29,6 +31,7 @@ async def action_set_weight(request: Request):
     form = await request.form()
     weight = float(form.get("weight", 1.0))
     await _api(f"/tasks/{task_name}/set_weight", method="POST", json_data={"weight": weight})
+    invalidate_all()
     resp = await partial_tasks(request)
     resp.headers["HX-Trigger"] = E.TASKS_CHANGED
     return resp
@@ -63,8 +66,8 @@ async def action_add_task(request: Request):
 
     result = await _api("/tasks/add", method="POST", json_data=json_data)
 
-    if result and isinstance(result, dict) and result.get("error"):
-        error = result["error"]
+    if is_error(result):
+        error = result.get("error", "Unknown error") if isinstance(result, dict) else "Failed"
         return HTMLResponse(
             f'<div class="panel"><h3>+ Task</h3><div class="error">{error}</div></div>'
         )

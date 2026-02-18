@@ -3,13 +3,13 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error
 
 
 async def partial_datasets(request: Request):
     """Dataset browser with sample thumbnails."""
     datasets = await _api("/datasets")
-    if not datasets or (isinstance(datasets, dict) and "error" in datasets):
+    if not datasets or is_error(datasets):
         return HTMLResponse(
             '<div class="panel"><h3>Datasets</h3><div class="empty">No datasets</div></div>'
         )

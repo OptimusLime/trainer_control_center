@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error, invalidate_all
 from acc.ui import events as E
 
 
@@ -37,11 +37,13 @@ async def action_generate_dataset(request: Request):
         "params": params,
     })
 
-    if result and isinstance(result, dict) and result.get("error"):
+    if is_error(result):
+        error = result.get("error", "Unknown error") if isinstance(result, dict) else "Failed"
         return HTMLResponse(
-            f'<div class="panel"><h3>+ Dataset</h3><div class="error">{result["error"]}</div></div>'
+            f'<div class="panel"><h3>+ Dataset</h3><div class="error">{error}</div></div>'
         )
 
+    invalidate_all()
     ds_name = result.get("name", "?") if result else "?"
     ds_size = result.get("size", "?") if result else "?"
     # HX-Trigger fires datasets-changed -> datasets panel + add-task panel auto-refresh
@@ -59,9 +61,10 @@ async def action_recipe_run(request: Request):
             '<div class="panel"><h3>Recipes</h3><div class="error">No recipe selected</div></div>'
         )
     result = await _api(f"/recipes/{recipe_name}/run", method="POST")
-    if result and isinstance(result, dict) and result.get("error"):
+    if is_error(result):
+        error = result.get("error", "Unknown error") if isinstance(result, dict) else "Failed"
         return HTMLResponse(
-            f'<div class="panel"><h3>Recipes</h3><div class="error">{result["error"]}</div></div>'
+            f'<div class="panel"><h3>Recipes</h3><div class="error">{error}</div></div>'
         )
     return HTMLResponse(
         '<div hx-get="/partial/recipe" hx-trigger="load" hx-swap="innerHTML"></div>'
