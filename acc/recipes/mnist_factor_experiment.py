@@ -1,14 +1,15 @@
 """MNIST Factor Experiment — three-branch comparison with vanilla baseline.
 
 Branch 0 (vanilla_vae): Standard ConvVAE baseline. Recon + KL only.
-  If this can't get recon L1 < 0.03 in 5 epochs, the pipeline is broken.
+  Sanity check: must get recon L1 < 0.05 in 10 epochs.
 
 Branch 1 (mnist_only): FactorSlotAutoencoder trained on MNIST only.
-  Recon + KL + digit classification. Thickness/slant slots learn from
-  recon+KL only.
+  Recon + KL (annealed) + digit classification. Thickness/slant slots
+  learn from recon+KL only — no explicit supervision.
 
 Branch 2 (with_curriculum): IDENTICAL FactorSlot architecture, PLUS synthetic
   thickness and slant regression tasks. Same fork point, same initial weights.
+  Tests whether explicit factor supervision improves disentanglement.
 
 Step count math:
   MNIST: 60k images, batch_size=64, 1 epoch = 937 batches.
@@ -29,16 +30,24 @@ from acc.tasks.kl_divergence import KLDivergenceTask
 from acc.tasks.regression import RegressionTask
 
 
+# Factor groups index into the CHANNEL dimension of the spatial bottleneck.
+# 32 channels total, 8x8 spatial → 2048 total flat latent dims.
+# Factor slices are channel groups, spatially pooled for probes/classification.
 FACTOR_GROUPS = [
-    FactorGroup("digit", 0, 4),
-    FactorGroup("thickness", 4, 7),
-    FactorGroup("slant", 7, 10),
-    FactorGroup("free", 10, 16),
+    FactorGroup("digit", 0, 8),          # 8 channels for digit identity
+    FactorGroup("thickness", 8, 14),     # 6 channels for stroke thickness
+    FactorGroup("slant", 14, 20),        # 6 channels for slant
+    FactorGroup("free", 20, 32),         # 12 channels for uncontrolled variation
 ]
 
 # 60k MNIST / batch 64 = 937 batches per epoch
 BATCHES_PER_EPOCH = 937
 RECON_EPOCHS = 10
+
+# KL annealing: warm up KL from 0 → full weight over this many KL-task steps.
+# With 3-task round-robin, KL is called every 3rd step, so 3000 KL steps ≈
+# 9000 total steps ≈ 3 recon epochs of warmup before full regularization.
+KL_WARMUP_STEPS = 3000
 
 
 def _build_factor_model() -> FactorSlotAutoencoder:
@@ -52,7 +61,7 @@ def _build_factor_model() -> FactorSlotAutoencoder:
 def _build_vanilla_vae() -> ConvVAE:
     return ConvVAE(
         in_channels=1,
-        latent_dim=16,
+        latent_dim=128,
         image_size=32,
         base_channels=32,
     )
@@ -73,10 +82,6 @@ class MNISTFactorExperiment(Recipe):
         # ============================================================
         # Branch 0: VANILLA VAE BASELINE
         # ============================================================
-        # This is our sanity check. If a standard ConvVAE can't learn
-        # MNIST recon through our pipeline, something is fundamentally
-        # broken in the training loop, loss function, or data loading.
-
         ctx.phase = "Build vanilla ConvVAE"
         ctx.create_model(_build_vanilla_vae)
 
@@ -113,9 +118,11 @@ class MNISTFactorExperiment(Recipe):
         ctx.detach_all_tasks()
 
         ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask("kl", mnist, weight=1.0))
+        ctx.attach_task(KLDivergenceTask(
+            "kl", mnist, weight=0.5, warmup_steps=KL_WARMUP_STEPS,
+        ))
         ctx.attach_task(
-            ClassificationTask("digit_classify", mnist, latent_slice=(0, 4))
+            ClassificationTask("digit_classify", mnist, factor_name="digit")
         )
 
         # 3 tasks round-robin, RECON_EPOCHS epochs of recon
@@ -138,9 +145,11 @@ class MNISTFactorExperiment(Recipe):
         ctx.detach_all_tasks()
 
         ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask("kl", mnist, weight=1.0))
+        ctx.attach_task(KLDivergenceTask(
+            "kl", mnist, weight=0.5, warmup_steps=KL_WARMUP_STEPS,
+        ))
         ctx.attach_task(
-            ClassificationTask("digit_classify", mnist, latent_slice=(0, 4))
+            ClassificationTask("digit_classify", mnist, factor_name="digit")
         )
 
         ctx.phase = "Generate synthetic datasets"
@@ -153,11 +162,11 @@ class MNISTFactorExperiment(Recipe):
 
         ctx.attach_task(
             RegressionTask(
-                "thickness", thickness_ds, output_dim=1, latent_slice=(4, 7)
+                "thickness", thickness_ds, output_dim=1, factor_name="thickness"
             )
         )
         ctx.attach_task(
-            RegressionTask("slant", slant_ds, output_dim=1, latent_slice=(7, 10))
+            RegressionTask("slant", slant_ds, output_dim=1, factor_name="slant")
         )
 
         # 5 tasks round-robin, RECON_EPOCHS epochs of recon
@@ -173,3 +182,7 @@ class MNISTFactorExperiment(Recipe):
         ctx.log(f"with_curriculum metrics: {metrics_2}")
 
         ctx.phase = f"Complete - compare vanilla vs mnist_only vs curriculum @ {RECON_EPOCHS} epochs"
+        ctx.log(f"COMPARISON @ {RECON_EPOCHS} recon epochs:")
+        ctx.log(f"  vanilla:        {metrics_0}")
+        ctx.log(f"  mnist_only:     {metrics_1}")
+        ctx.log(f"  with_curriculum: {metrics_2}")

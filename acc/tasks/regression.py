@@ -3,7 +3,8 @@
 Linear(latent_dim, output_dim), MSE loss, MAE eval.
 check_compatible: dataset must have float targets.
 
-Same class supports full latent or sliced via latent_slice config.
+Same class supports full latent, sliced via latent_slice, or
+factor-targeted via factor_name.
 """
 
 import torch
@@ -26,7 +27,8 @@ class RegressionTask(Task):
         dataset: Dataset with float targets.
         output_dim: Dimension of regression output. If None, inferred from dataset.
         weight: Loss weight.
-        latent_slice: Optional (start, end) to read a factor slice.
+        latent_slice: Optional (start, end) to read a flat latent slice.
+        factor_name: Optional factor group name to read spatially-pooled factor vector.
     """
 
     def __init__(
@@ -36,8 +38,12 @@ class RegressionTask(Task):
         output_dim: int | None = None,
         weight: float = 1.0,
         latent_slice: tuple[int, int] | None = None,
+        factor_name: str | None = None,
     ):
-        super().__init__(name, dataset, weight=weight, latent_slice=latent_slice)
+        super().__init__(
+            name, dataset, weight=weight,
+            latent_slice=latent_slice, factor_name=factor_name,
+        )
         self._output_dim = output_dim
 
     def check_compatible(self, autoencoder: nn.Module, dataset: AccDataset) -> None:

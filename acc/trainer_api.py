@@ -462,7 +462,7 @@ class TrainerAPI:
             with torch.no_grad():
                 images = ds.sample(n).to(self.device)
                 model_out = self.autoencoder(images)
-                recon = model_out[ModelOutput.RECONSTRUCTION]
+                recon = model_out[ModelOutput.RECONSTRUCTION].clamp(0, 1)
 
                 originals = [_tensor_to_base64(images[i]) for i in range(n)]
                 reconstructions = [_tensor_to_base64(recon[i]) for i in range(n)]
@@ -673,29 +673,51 @@ class TrainerAPI:
                 if ds is None:
                     return {"error": "No datasets loaded"}
 
-                self.autoencoder.eval()
+                model = self.autoencoder
+                model.eval()
                 with torch.no_grad():
                     seeds = ds.sample(n_seeds).to(self.device)
-                    model_out = self.autoencoder(seeds)
-                    z_base = model_out[ModelOutput.MU]
+                    model_out = model(seeds)
+                    z_flat = model_out[ModelOutput.MU]  # (B, total_latent_dim)
+
+                    # For spatial bottleneck: reshape to (B, C, h, w) so we can
+                    # vary entire channel groups (= factor groups) at once.
+                    has_spatial = hasattr(model, "latent_channels")
+                    if has_spatial:
+                        z_spatial = z_flat.view(
+                            n_seeds, model.latent_channels,
+                            model._spatial_size, model._spatial_size,
+                        )
 
                     result = {}
-                    for fg in self.autoencoder.factor_groups:
+                    for fg in model.factor_groups:
                         rows = []
                         for seed_idx in range(n_seeds):
                             row_images = []
-                            z_seed = z_base[seed_idx].clone()
-                            # Get the mean activation for this factor group across seeds
-                            # to use as the center of the traversal range
-                            fg_mean = z_base[:, fg.latent_start : fg.latent_end].mean(dim=0)
-                            fg_std = z_base[:, fg.latent_start : fg.latent_end].std(dim=0).clamp(min=0.1)
-                            for step_i in range(n_steps):
-                                # Vary relative to population stats: mean +/- range * std
-                                alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
-                                z_mod = z_seed.clone().unsqueeze(0)
-                                z_mod[0, fg.latent_start : fg.latent_end] = fg_mean + alpha * fg_std
-                                recon = _decode_z(self.autoencoder, z_mod)
-                                row_images.append(_tensor_to_base64(recon[0]))
+                            if has_spatial:
+                                # Vary channel group in spatial z
+                                z_seed = z_spatial[seed_idx].clone()  # (C, h, w)
+                                ch_slice = z_spatial[:, fg.latent_start:fg.latent_end]  # (B, fg_ch, h, w)
+                                fg_mean = ch_slice.mean(dim=0)  # (fg_ch, h, w)
+                                fg_std = ch_slice.std(dim=0).clamp(min=0.1)
+                                for step_i in range(n_steps):
+                                    alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                                    z_mod = z_seed.clone().unsqueeze(0)  # (1, C, h, w)
+                                    z_mod[0, fg.latent_start:fg.latent_end] = fg_mean + alpha * fg_std
+                                    z_mod_flat = z_mod.flatten(1)  # (1, total_latent_dim)
+                                    recon = _decode_z(model, z_mod_flat)
+                                    row_images.append(_tensor_to_base64(recon[0]))
+                            else:
+                                # Flat latent: vary flat slice directly
+                                z_seed = z_flat[seed_idx].clone()
+                                fg_mean = z_flat[:, fg.latent_start:fg.latent_end].mean(dim=0)
+                                fg_std = z_flat[:, fg.latent_start:fg.latent_end].std(dim=0).clamp(min=0.1)
+                                for step_i in range(n_steps):
+                                    alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                                    z_mod = z_seed.clone().unsqueeze(0)
+                                    z_mod[0, fg.latent_start:fg.latent_end] = fg_mean + alpha * fg_std
+                                    recon = _decode_z(model, z_mod)
+                                    row_images.append(_tensor_to_base64(recon[0]))
                             rows.append(row_images)
                         result[fg.name] = rows
 
@@ -1011,35 +1033,31 @@ class TrainerAPI:
 
 
 def _decode_z(model: torch.nn.Module, z: torch.Tensor) -> torch.Tensor:
-    """Decode a latent vector z through the model's decoder.
+    """Decode a flat latent vector z through the model's decoder.
 
-    Works with FactorSlotAutoencoder: splits z into factor slices,
-    embeds them, and runs through the decoder stages.
-    Falls back to a full forward pass with zeros if model doesn't
-    have the expected decoder structure.
+    Works with FactorSlotAutoencoder (spatial bottleneck): reshapes flat z
+    to spatial, extracts factor slices, embeds them, runs decoder stages.
+
+    z shape: (B, total_latent_dim) where total_latent_dim = latent_channels * h * w
     """
-    if hasattr(model, "factor_groups") and hasattr(model, "decoder_init"):
-        # FactorSlotAutoencoder decoder path
+    if hasattr(model, "factor_groups") and hasattr(model, "decoder_input"):
+        # FactorSlotAutoencoder with spatial bottleneck
         B = z.shape[0]
-        factor_slices = {}
-        for fg in model.factor_groups:
-            factor_slices[fg.name] = z[:, fg.latent_start : fg.latent_end]
+        # Reshape flat z back to spatial: (B, latent_channels, h, w)
+        z_spatial = z.view(B, model.latent_channels, model._spatial_size, model._spatial_size)
 
+        # Extract factor slices (channel groups, spatially pooled) for cross-attention
+        factor_slices = model._extract_factor_slices(z_spatial)
         factor_embeds = model.factor_embedder(factor_slices)
-        h = model.decoder_init(z).view(
-            B,
-            model._decoder_init_ch,
-            model._decoder_init_spatial,
-            model._decoder_init_spatial,
-        )
+
+        # Decode from spatial latent
+        h = model.decoder_input(z_spatial)
         for stage, cross_attn in zip(model.decoder_stages, model.cross_attn_stages):
             h = stage(h)
             if cross_attn is not None:
                 h = cross_attn(h, factor_embeds)
-        return model.to_output(h)
+        return model.to_output(h).clamp(0, 1)
     else:
-        # Fallback: run full forward with a zero image, not ideal
-        # but works for simple autoencoders
         raise NotImplementedError("Traversals require FactorSlotAutoencoder")
 
 

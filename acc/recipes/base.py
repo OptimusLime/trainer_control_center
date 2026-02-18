@@ -62,12 +62,20 @@ class RecipeContext:
         return self._api.checkpoints.current_id
 
     def create_model(self, builder: Callable[[], nn.Module]) -> None:
-        """Set the current model. builder() returns an nn.Module."""
+        """Set the current model. builder() returns an nn.Module.
+
+        Resets checkpoint lineage so the first save after a new model
+        becomes a new root node in the checkpoint tree (not chained to
+        whatever was saved last).
+        """
         model = builder()
         model = model.to(self._api.device)
         self._api.autoencoder = model
         self._api.trainer = None
         self._api.tasks.clear()
+        # Reset checkpoint lineage — new model = new root
+        if self._api.checkpoints is not None:
+            self._api.checkpoints._current_id = None
 
     def load_dataset(self, name: str, loader: Callable[[], AccDataset]) -> AccDataset:
         """Load or generate a dataset. Returns it and registers with the API."""
@@ -89,15 +97,23 @@ class RecipeContext:
         self._api.tasks.clear()
         self._api.trainer = None
 
-    def save_checkpoint(self, tag: str) -> str:
-        """Save current state, return checkpoint_id. Persists loss summary from most recent job."""
+    def save_checkpoint(self, tag: str, parent_id: Optional[str] = None) -> str:
+        """Save current state, return checkpoint_id. Persists loss summary from most recent job.
+
+        Args:
+            tag: Human-readable tag for the checkpoint.
+            parent_id: Explicit parent checkpoint ID. If None, uses the
+                checkpoint store's current lineage (last saved/loaded).
+        """
         if self._api.autoencoder is None:
             raise RuntimeError("No model to checkpoint.")
         self._ensure_trainer()
         if self._api.checkpoints is None:
             from acc.checkpoints import CheckpointStore
             self._api.checkpoints = CheckpointStore("./acc/checkpoints_data")
-        cp = self._api.checkpoints.save(self._api.autoencoder, self._api.trainer, tag=tag)
+        cp = self._api.checkpoints.save(
+            self._api.autoencoder, self._api.trainer, tag=tag, parent_id=parent_id,
+        )
         # Persist loss summary from most recent job
         from acc.loss_health import compute_loss_summary
         recent_jobs = self._api.jobs.list()

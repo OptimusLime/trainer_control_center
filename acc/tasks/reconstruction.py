@@ -60,8 +60,11 @@ class ReconstructionTask(Task):
             model_output = autoencoder(images)
             recon = model_output[ModelOutput.RECONSTRUCTION]
 
-            total_l1 += nn.functional.l1_loss(recon, images).item()
-            total_mse += nn.functional.mse_loss(recon, images).item()
+            # Clamp reconstruction to [0,1] for eval metrics.
+            # Models without sigmoid output may produce values outside [0,1].
+            recon_clamped = recon.clamp(0, 1)
+            total_l1 += nn.functional.l1_loss(recon_clamped, images).item()
+            total_mse += nn.functional.mse_loss(recon_clamped, images).item()
             n_batches += 1
 
         autoencoder.train()

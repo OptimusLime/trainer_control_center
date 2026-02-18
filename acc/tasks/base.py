@@ -8,8 +8,16 @@ task.check_compatible(autoencoder, dataset) first. If incompatible,
 it raises TaskError with a human-readable explanation.
 
 Tasks receive the full model_output dict (keyed by ModelOutput enum) and
-pick what they need. A task with latent_slice=(8, 24) reads z[:, 8:24]
-instead of the full latent. Same class, different config.
+pick what they need. Two ways to target a latent subset:
+
+1. latent_slice=(start, end) — reads LATENT[:, start:end] (flat vector).
+   Use for simple models without factor groups (e.g., ConvVAE).
+
+2. factor_name="digit" — reads FACTOR_SLICES["digit"] (spatially pooled
+   factor vector). Use for FactorSlot models. The model must have
+   factor_groups and the forward output must contain FACTOR_SLICES.
+
+Same class, different config.
 """
 
 from abc import ABC, abstractmethod
@@ -56,11 +64,19 @@ class Task(ABC):
         dataset: AccDataset,
         weight: float = 1.0,
         latent_slice: Optional[tuple[int, int]] = None,
+        factor_name: Optional[str] = None,
     ):
+        if latent_slice is not None and factor_name is not None:
+            raise ValueError(
+                "Cannot set both latent_slice and factor_name. "
+                "Use latent_slice for flat vector indexing, "
+                "factor_name for spatially-pooled factor vectors."
+            )
         self.name = name
         self.dataset = dataset
         self.weight = weight
         self.latent_slice = latent_slice
+        self.factor_name = factor_name
         self.enabled = True
         self.head: Optional[nn.Module] = None
         self._attached = False
@@ -71,13 +87,33 @@ class Task(ABC):
         Calls check_compatible first — raises TaskError if the model or
         dataset is incompatible with this task.
 
-        Head input dim is determined by latent_slice if set, else full latent_dim.
+        Head input dim is determined by:
+        - factor_name: reads from model's factor_groups to get dim
+        - latent_slice: (end - start)
+        - otherwise: full latent_dim
         """
         self.check_compatible(autoencoder, self.dataset)
 
         full_latent_dim = autoencoder.latent_dim
 
-        if self.latent_slice is not None:
+        if self.factor_name is not None:
+            # Resolve head_dim from the model's factor_groups
+            if not hasattr(autoencoder, "factor_groups"):
+                raise TaskError(
+                    f"Task '{self.name}' uses factor_name='{self.factor_name}' "
+                    f"but model has no factor_groups attribute. "
+                    f"Use latent_slice for non-factor models."
+                )
+            fg_map = {fg.name: fg for fg in autoencoder.factor_groups}
+            if self.factor_name not in fg_map:
+                available = [fg.name for fg in autoencoder.factor_groups]
+                raise TaskError(
+                    f"Task '{self.name}' uses factor_name='{self.factor_name}' "
+                    f"but model has no such factor group. "
+                    f"Available: {available}"
+                )
+            head_dim = fg_map[self.factor_name].latent_dim
+        elif self.latent_slice is not None:
             start, end = self.latent_slice
             if start < 0 or end > full_latent_dim or start >= end:
                 raise TaskError(
@@ -95,9 +131,27 @@ class Task(ABC):
     def _get_latent(self, model_output: dict[str, torch.Tensor]) -> torch.Tensor:
         """Extract the latent tensor this task should read.
 
-        If latent_slice is set, returns the slice. Otherwise returns full latent.
-        This is the single place where slicing happens — all tasks call this.
+        Priority: factor_name > latent_slice > full latent.
+        This is the single place where latent extraction happens — all tasks call this.
         """
+        if self.factor_name is not None:
+            # FACTOR_SLICES is dict[str, Tensor] inside the model_output dict.
+            # The outer dict type annotation can't express this, so we cast.
+            factor_slices: dict[str, torch.Tensor] | None = model_output.get(  # type: ignore[assignment]
+                ModelOutput.FACTOR_SLICES
+            )
+            if factor_slices is None:
+                raise TaskError(
+                    f"Task '{self.name}' uses factor_name='{self.factor_name}' "
+                    f"but model output has no FACTOR_SLICES."
+                )
+            if self.factor_name not in factor_slices:
+                raise TaskError(
+                    f"Task '{self.name}' uses factor_name='{self.factor_name}' "
+                    f"but FACTOR_SLICES keys are: {list(factor_slices.keys())}"
+                )
+            return factor_slices[self.factor_name]
+
         latent = model_output[ModelOutput.LATENT]
         if self.latent_slice is not None:
             start, end = self.latent_slice
@@ -150,4 +204,6 @@ class Task(ABC):
         }
         if self.latent_slice is not None:
             info["latent_slice"] = list(self.latent_slice)
+        if self.factor_name is not None:
+            info["factor_name"] = self.factor_name
         return info
