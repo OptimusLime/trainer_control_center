@@ -1,0 +1,87 @@
+/* ACC Dashboard Styles — extracted from app.py inline <style> block.
+   Single source of truth for all dashboard CSS. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; background: #0d1117; color: #c9d1d9; font-size: 13px; }
+.layout { display: grid; grid-template-columns: 300px 1fr; min-height: 100vh; }
+.sidebar { background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }
+.main { padding: 16px; overflow-y: auto; }
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; grid-column: 1 / -1; }
+.header h1 { font-size: 16px; color: #58a6ff; font-weight: 600; }
+.header .step { color: #8b949e; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+.panel h3 { color: #58a6ff; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.task-card { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; margin-bottom: 6px; }
+.task-card .name { color: #f0f6fc; font-weight: 600; }
+.task-card .type { color: #8b949e; font-size: 11px; }
+.task-card .metrics { color: #7ee787; font-size: 12px; margin-top: 4px; }
+.btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+.btn:hover { background: #30363d; }
+.btn-primary { background: #238636; border-color: #238636; color: #fff; }
+.btn-primary:hover { background: #2ea043; }
+.btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+.btn-danger:hover { background: #f85149; }
+.btn-sm { padding: 2px 6px; font-size: 11px; }
+.training-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.training-controls input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 80px; font-family: inherit; }
+.training-controls label { color: #8b949e; font-size: 11px; }
+.chart-container { position: relative; height: 250px; margin: 8px 0; }
+.model-desc { white-space: pre-wrap; font-size: 11px; color: #8b949e; background: #0d1117; padding: 8px; border-radius: 4px; overflow-x: auto; }
+.checkpoint { padding: 4px 0; font-size: 12px; }
+.checkpoint .tag { color: #f0f6fc; }
+.checkpoint .meta { color: #8b949e; font-size: 11px; }
+.recon-grid { display: flex; gap: 4px; flex-wrap: wrap; }
+.recon-grid img { width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #30363d; }
+.recon-pair { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+.recon-pair img { width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #30363d; }
+.recon-pair .recon-label { font-size: 9px; color: #8b949e; }
+.recon-row { margin-bottom: 4px; }
+.recon-label { color: #8b949e; font-size: 11px; margin-bottom: 2px; }
+.status-running { color: #f0883e; }
+.status-completed { color: #7ee787; }
+.status-stopped { color: #8b949e; }
+.status-failed { color: #f85149; }
+.job-item { padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 12px; cursor: pointer; }
+.job-item:hover { background: #1c2333; }
+.empty { color: #484f58; font-style: italic; padding: 8px 0; }
+.error { color: #f85149; padding: 8px; background: #1c0b0b; border: 1px solid #f85149; border-radius: 4px; margin: 8px 0; }
+#loss-log { max-height: 120px; overflow-y: auto; font-size: 11px; color: #8b949e; background: #0d1117; padding: 4px; border-radius: 4px; margin-top: 8px; }
+.recipe-select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 12px; margin-bottom: 8px; }
+.recipe-desc { color: #8b949e; font-size: 11px; margin-bottom: 8px; }
+.phase-indicator { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 8px; margin-top: 8px; }
+.phase-current { color: #f0883e; font-weight: 600; font-size: 12px; }
+.phase-done { color: #7ee787; font-size: 11px; }
+.phase-item { padding: 2px 0; }
+.tree-node { padding: 4px 0; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.tree-indent { display: inline-block; width: 16px; text-align: center; color: #30363d; }
+.tree-branch { color: #30363d; }
+.tree-tag { color: #f0f6fc; font-weight: 600; }
+.tree-meta { color: #8b949e; font-size: 11px; }
+.tree-current { background: #1c2333; border-radius: 3px; padding: 2px 4px; }
+.tree-actions { display: flex; gap: 4px; }
+.traversal-group { margin-bottom: 12px; }
+.traversal-group h4 { color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }
+.traversal-grid { display: grid; gap: 2px; }
+.traversal-grid img { width: 36px; height: 36px; image-rendering: pixelated; border: 1px solid #21262d; }
+.sort-group { margin-bottom: 12px; }
+.sort-group h4 { color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }
+.sort-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }
+.sort-label { color: #8b949e; font-size: 11px; margin-bottom: 2px; }
+.sort-row img { width: 32px; height: 32px; image-rendering: pixelated; border: 1px solid #21262d; }
+.attn-group { margin-bottom: 12px; }
+.attn-group h4 { color: #d2a8ff; font-size: 12px; margin-bottom: 4px; }
+.attn-grid { display: grid; gap: 4px; grid-template-columns: repeat(auto-fit, minmax(48px, 1fr)); }
+.attn-grid img { width: 48px; height: 48px; image-rendering: pixelated; border: 1px solid #21262d; }
+.attn-pair { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+.attn-pair img { width: 64px; height: 64px; image-rendering: pixelated; border: 1px solid #21262d; }
+.attn-pair .attn-label { font-size: 9px; color: #8b949e; }
+.form-group { margin-bottom: 8px; }
+.form-group label { display: block; color: #8b949e; font-size: 11px; margin-bottom: 3px; }
+.form-group select, .form-group input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; width: 100%; font-family: inherit; font-size: 12px; }
+.eval-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.eval-table th { text-align: left; color: #8b949e; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #30363d; }
+.eval-table td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+.metric-good { color: #7ee787; }
+.metric-mid { color: #f0883e; }
+.metric-bad { color: #f85149; }
+.weight-input { width: 50px !important; display: inline !important; padding: 2px 4px !important; }
