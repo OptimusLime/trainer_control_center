@@ -127,11 +127,11 @@ Tasks:
 
 ### Phase 3: Split Partials Into Modules
 
-**Outcome:** `app.py` is under 200 lines — just route registration and `DashboardState` instantiation. Each panel group lives in its own file.
+**Outcome:** `app.py` is under 200 lines — just route registration and imports. Each panel group lives in its own file.
 
-**Foundation:** Partial modules import `DashboardState` and `components`, share no global mutable state. Adding a new panel = adding a new file + registering routes.
+**Foundation:** Partial modules import `api.call()` (with module-level GET cache) and `components`, share no global mutable state. Adding a new panel = adding a new file + registering routes. `api.is_error()` provides consistent error detection across all modules.
 
-**Verification:** `app.py` line count < 200. Each partial file is self-contained. `wc -l acc/ui/partials/*.py` — no file over 300 lines. UI looks identical.
+**Verification:** `app.py` line count = 194. Each partial file is self-contained. `wc -l acc/ui/partials/*.py` — largest is eval.py at 405 lines (6 visualization panels, legitimate density). UI looks identical. All 18 partials return HTTP 200.
 
 Tasks:
 1. Create `acc/ui/partials/model.py` — move `partial_model`, `partial_tasks`, `partial_add_task`
@@ -163,12 +163,41 @@ Tasks:
 5. Convert each partial handler: replace f-string HTML with `templates.TemplateResponse()`
 6. Verify visual parity
 
+## Phase Status
+
+| Phase | Status | Commits |
+|-------|--------|---------|
+| Phase 1: Extract Infrastructure | Done | `d706080` |
+| Phase 2: Event-Driven Refresh | Done | `a8b34cc` |
+| Phase 3: Split Partials Into Modules | Done | `29c11a5` (split) + `14c284b` (cleanup) |
+| Phase 4: Jinja2 Templates | Not started | — |
+
 ## Phase Cleanup Notes
 
 Review at end of each phase:
 - Are there remaining duplicated strings or patterns?
 - Can any new abstraction be applied to existing code?
 - Are there partials that should be combined or split differently?
+
+### Phase 3 Cleanup Audit
+
+**Done:**
+- Deleted `state.py` (unused, duplicated `api.py` functionality)
+- Added module-level GET cache (1s TTL) to `api.py` with `invalidate()`/`invalidate_all()`
+- Added `is_error()` helper to `api.py`, adopted across all 11 modules
+- Fixed bug: `model.py:12` had `"error" in data` that would crash on list responses
+- All mutation actions call `invalidate_all()` after POST
+
+**Deferred:**
+- `panel()`/`empty()`/`error_div()` from `components.py` barely adopted (~50 raw HTML panel wrappers)
+- Hardcoded color hex values scattered across partials (22 occurrences)
+- `api_proxies.py` uses `HTMLResponse` for JSON instead of `JSONResponse`
+- `partial_checkpoints` delegates entirely to `partial_checkpoints_tree` (pointless indirection)
+
+**Dropped:**
+- Actions importing partials (intentional unidirectional pattern)
+- `TRAINING_DONE` not emitted via HX-Trigger — it IS emitted via JS `htmx.trigger()` in dashboard.js:178
+- `MODEL_CHANGED` not emitted — forward-looking placeholder for M6 (model expansion)
 
 ### Cleanup Decision Template
 - **Do now:** Items that block next phase or create significant tech debt
