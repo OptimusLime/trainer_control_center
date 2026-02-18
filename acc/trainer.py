@@ -1,16 +1,17 @@
-"""Trainer — multi-task training with round-robin task scheduling.
+"""Trainer — multi-task training with weighted task sampling.
 
 All losses come from tasks. No special reconstruction carve-out.
-Task losses round-robin: each step samples from the next enabled task's dataloader.
+Task selection is weighted random: each step picks a task proportionally
+to its sampling weight.  Default weights are uniform (= round-robin).
 """
 
 from typing import Callable, Optional
-import itertools
+import random
 import time
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.optim as optim  # noqa: F401
 
 from acc.tasks.base import Task
 from acc.loss_health import classify_loss
@@ -79,12 +80,17 @@ class Trainer:
         self,
         steps: int,
         on_step: Optional[Callable[[dict], None]] = None,
+        task_weights: Optional[dict[str, float]] = None,
     ) -> list[dict]:
-        """Train for the given number of steps with round-robin task scheduling.
+        """Train for the given number of steps with weighted task sampling.
 
         Args:
             steps: Number of training steps.
             on_step: Optional callback called after each step with step info dict.
+            task_weights: Optional dict mapping task_name -> sampling weight.
+                Tasks not listed get weight 1.0.  Weights are relative —
+                {"recon": 9, "kl": 1} means recon is sampled 90% of the time.
+                If None, all tasks have equal weight (uniform sampling).
 
         Returns:
             List of per-step loss dicts.
@@ -99,7 +105,7 @@ class Trainer:
         if not enabled:
             return []
 
-        # Build dataloaders for enabled tasks (round-robin iterators)
+        # Build dataloaders for enabled tasks
         task_iters = {}
         task_loaders = {}
         for task in enabled:
@@ -107,15 +113,16 @@ class Trainer:
             task_loaders[task.name] = loader
             task_iters[task.name] = iter(loader)
 
-        # Round-robin cycle through tasks
-        task_cycle = itertools.cycle(enabled)
+        # Build sampling weights (normalize to probabilities)
+        weights = [task_weights.get(t.name, 1.0) if task_weights else 1.0 for t in enabled]
         loss_history = []
 
         for step in range(1, steps + 1):
             if self._stop_requested:
                 break
 
-            task = next(task_cycle)
+            # Weighted random selection (random.choices returns a list)
+            task = random.choices(enabled, weights=weights, k=1)[0]
 
             # Get next batch, restart iterator if exhausted
             try:

@@ -139,8 +139,25 @@ class RecipeContext:
         self._checkpoints_created.append(fork_cp.id)
         return fork_cp.id
 
-    def train(self, steps: int, lr: float = 1e-3, probe_lr: float = 1e-3, batch_size: int = 64) -> list[dict]:
-        """Train for N steps. Routes through JobManager so losses are visible in the dashboard."""
+    def train(
+        self,
+        steps: int,
+        lr: float = 1e-3,
+        probe_lr: float = 1e-3,
+        batch_size: int = 64,
+        task_weights: Optional[dict[str, float]] = None,
+    ) -> list[dict]:
+        """Train for N steps. Routes through JobManager so losses are visible in the dashboard.
+
+        Args:
+            steps: Number of training steps.
+            lr: Learning rate for model parameters.
+            probe_lr: Learning rate for probe heads.
+            batch_size: Batch size for dataloaders.
+            task_weights: Optional dict mapping task_name -> sampling weight.
+                Weights are relative — {"recon": 9, "kl": 1} means recon
+                is sampled 90% of steps.  If None, uniform sampling.
+        """
         if self._stopped:
             return []
         self._ensure_trainer(batch_size=batch_size)
@@ -159,6 +176,7 @@ class RecipeContext:
             steps=steps,
             checkpoint_id=self.current_checkpoint_id,
             blocking=True,
+            task_weights=task_weights,
         )
         return job.losses
 

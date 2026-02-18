@@ -67,6 +67,7 @@ class JobManager:
         steps: int,
         checkpoint_id: Optional[str] = None,
         blocking: bool = True,
+        task_weights: Optional[dict[str, float]] = None,
     ) -> JobInfo:
         """Start a new training job.
 
@@ -75,6 +76,8 @@ class JobManager:
             steps: Number of training steps.
             checkpoint_id: Which checkpoint this started from (for tracking).
             blocking: If True, run synchronously. If False, run in background thread.
+            task_weights: Optional dict mapping task_name -> sampling weight.
+                Passed through to Trainer.train().
 
         Returns:
             The JobInfo for this run.
@@ -103,7 +106,7 @@ class JobManager:
 
         def run_training():
             try:
-                trainer.train(steps=steps, on_step=on_step)
+                trainer.train(steps=steps, on_step=on_step, task_weights=task_weights)
                 with self._lock:
                     if job.state == "running":
                         job.state = "completed"
