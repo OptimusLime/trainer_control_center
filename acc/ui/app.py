@@ -243,6 +243,15 @@ def _chart_js() -> str:
 
     const HEALTH_COLORS = { healthy: '#7ee787', warning: '#f0883e', critical: '#f85149' };
 
+    // --- Buffered loss rendering ---
+    // Incoming SSE points are pushed to a buffer. A 200ms timer flushes
+    // the buffer: updates chart once, appends log entries in one DOM write,
+    // and updates the health banner. This prevents the browser from
+    // drowning in per-step reflows during fast training.
+    let lossBuf = [];
+    let flushTimer = null;
+    const FLUSH_INTERVAL = 200; // ms
+
     function addLossPoint(step, taskName, loss, health) {
         if (!lossData[taskName]) {
             const idx = Object.keys(lossData).length;
@@ -256,28 +265,51 @@ def _chart_js() -> str:
             };
         }
         lossData[taskName].data.push({ x: step, y: loss });
+        lossBuf.push({ step, taskName, loss, health });
 
+        if (!flushTimer) {
+            flushTimer = setTimeout(flushLossBuf, FLUSH_INTERVAL);
+        }
+    }
+
+    function flushLossBuf() {
+        flushTimer = null;
+        if (lossBuf.length === 0) return;
+
+        // Chart: single update
         if (lossChart) {
             lossChart.data.datasets = Object.values(lossData);
             lossChart.update('none');
         }
 
-        // Update step counter
+        // Step counter: latest step
+        const lastEntry = lossBuf[lossBuf.length - 1];
         const counter = document.getElementById('step-counter');
-        if (counter) counter.textContent = '[step: ' + step + ']';
+        if (counter) counter.textContent = '[step: ' + lastEntry.step + ']';
 
-        // Update loss log with health coloring
+        // Loss log: batch append (only last 20 entries to avoid DOM bloat)
         const log = document.getElementById('loss-log');
         if (log) {
-            const color = HEALTH_COLORS[health] || '#8b949e';
-            log.innerHTML += '<div style="color:' + color + ';">step ' + step + ' | ' + taskName + ': ' + loss.toFixed(4) + (health === 'critical' ? ' !!!' : health === 'warning' ? ' !' : '') + '</div>';
+            const tail = lossBuf.slice(-20);
+            let html = '';
+            for (const e of tail) {
+                const color = HEALTH_COLORS[e.health] || '#8b949e';
+                html += '<div style="color:' + color + ';">step ' + e.step + ' | ' + e.taskName + ': ' + e.loss.toFixed(4) + (e.health === 'critical' ? ' !!!' : e.health === 'warning' ? ' !' : '') + '</div>';
+            }
+            log.innerHTML += html;
+            // Cap total log entries to prevent memory bloat
+            while (log.childElementCount > 500) { log.removeChild(log.firstChild); }
             log.scrollTop = log.scrollHeight;
         }
 
-        // Update live health banner
-        if (health) {
-            updateHealthBanner(taskName, loss, health);
+        // Health banner: only update with the latest per-task values
+        for (const e of lossBuf) {
+            if (e.health) {
+                updateHealthBanner(e.taskName, e.loss, e.health);
+            }
         }
+
+        lossBuf = [];
     }
 
     // Track worst health across all tasks for the banner
@@ -1768,6 +1800,7 @@ async def sse_job(request: Request):
 
     async def event_generator():
         try:
+            count = 0
             async with httpx.AsyncClient() as client:
                 async with client.stream(
                     "GET",
@@ -1776,7 +1809,13 @@ async def sse_job(request: Request):
                 ) as response:
                     async for line in response.aiter_lines():
                         if line.startswith("data:"):
-                            yield f"{line}\n\n"
+                            # Always forward "done" events; throttle the rest
+                            if '"done"' in line:
+                                yield f"{line}\n\n"
+                            else:
+                                count += 1
+                                if count % 10 == 0:
+                                    yield f"{line}\n\n"
         except Exception:
             yield 'data: {"done": true}\n\n'
 

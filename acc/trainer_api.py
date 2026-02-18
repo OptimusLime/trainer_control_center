@@ -56,6 +56,40 @@ class TrainerAPI:
 
         self._register_routes()
 
+    def _is_model_busy(self) -> bool:
+        """Check if ANY background thread is using the model/CUDA.
+
+        This covers two cases:
+        1. A training job is running (jobs.current() is not None)
+        2. A recipe is running — even between training jobs, the recipe
+           thread does CUDA work (evaluate, checkpoint save/load,
+           model.to(device), etc.)
+        """
+        if self.jobs.current() is not None:
+            return True
+        rj = self.recipe_runner.current()
+        if rj is not None and rj.state == "running":
+            return True
+        return False
+
+    def _training_guard(self) -> Optional[JSONResponse]:
+        """Return a 409 response if model/CUDA is busy, None otherwise.
+
+        CUDA is not thread-safe — running model forward passes from the
+        API thread while a background thread (training or recipe) is also
+        doing CUDA operations corrupts the CUDA context and kills the process.
+
+        The guard covers:
+        - Active training jobs (forward/backward on training thread)
+        - Active recipes (evaluate, checkpoint, model creation between jobs)
+        """
+        if self._is_model_busy():
+            return JSONResponse(
+                {"error": "Model is busy (training or recipe running). Eval endpoints are disabled."},
+                status_code=409,
+            )
+        return None
+
     def _register_routes(self):
         app = self.app
 
@@ -140,6 +174,9 @@ class TrainerAPI:
 
         @app.post("/tasks/add")
         async def add_task(request: Request):
+            guard = self._training_guard()
+            if guard:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model loaded"}, status_code=400)
 
@@ -196,6 +233,9 @@ class TrainerAPI:
 
         @app.post("/tasks/{name}/remove")
         async def remove_task(name: str):
+            guard = self._training_guard()
+            if guard:
+                return guard
             task = self.tasks.pop(name, None)
             if task is None:
                 return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
@@ -205,6 +245,9 @@ class TrainerAPI:
         # -- Training / Jobs --
         @app.post("/train/start")
         async def train_start(request: Request):
+            guard = self._training_guard()
+            if guard:
+                return guard
             if self.trainer is None:
                 return JSONResponse(
                     {"error": "No trainer configured. Add model and tasks first."},
@@ -397,6 +440,9 @@ class TrainerAPI:
         # -- Evaluation --
         @app.post("/eval/run")
         async def run_eval():
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.trainer is None:
                 return JSONResponse({"error": "No trainer"}, status_code=400)
             results = self.trainer.evaluate_all()
@@ -410,6 +456,9 @@ class TrainerAPI:
             Body: {"checkpoint_id": "abc123"}
             Returns: {"checkpoint_id": "abc123", "tag": "...", "metrics": {task: {metric: val}}}
             """
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.trainer is None or self.autoencoder is None or self.checkpoints is None:
                 return JSONResponse({"error": "No trainer/model/checkpoint store"}, status_code=400)
 
@@ -445,6 +494,9 @@ class TrainerAPI:
         @app.post("/eval/reconstructions")
         async def eval_reconstructions(request: Request):
             """Encode + decode N images, return originals and reconstructions side-by-side."""
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model loaded"}, status_code=400)
             if not self.autoencoder.has_decoder:
@@ -500,6 +552,9 @@ class TrainerAPI:
 
         @app.post("/checkpoints/load")
         async def load_checkpoint(request: Request):
+            guard = self._training_guard()
+            if guard:
+                return guard
             if (
                 self.autoencoder is None
                 or self.trainer is None
@@ -661,6 +716,9 @@ class TrainerAPI:
 
             Returns: {"factor_name": [row_of_base64_pngs, ...], ...}
             """
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model"}, status_code=400)
             if not hasattr(self.autoencoder, "factor_groups"):
@@ -751,6 +809,9 @@ class TrainerAPI:
 
             Returns: {"factor_name": {"lowest": [...], "highest": [...]}, ...}
             """
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model"}, status_code=400)
             if not hasattr(self.autoencoder, "factor_groups"):
@@ -816,6 +877,9 @@ class TrainerAPI:
                     "originals": [base64, ...]
                 }
             """
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model"}, status_code=400)
             if not hasattr(self.autoencoder, "cross_attn_stages"):
@@ -844,14 +908,14 @@ class TrainerAPI:
 
                 return result
 
-            if checkpoint_id:
-                try:
+            try:
+                if checkpoint_id:
                     with self._load_checkpoint_temporarily(checkpoint_id):
                         result = _generate_attention()
-                except (FileNotFoundError, RuntimeError) as e:
-                    return JSONResponse({"error": str(e)}, status_code=400)
-            else:
-                result = _generate_attention()
+                else:
+                    result = _generate_attention()
+            except Exception as e:
+                return JSONResponse({"error": f"Attention extraction failed: {e}"}, status_code=400)
 
             if "error" in result:
                 return JSONResponse(result, status_code=400)
@@ -863,6 +927,9 @@ class TrainerAPI:
 
             Returns: {"ufr": float, "disentanglement": float, "completeness": float}
             """
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
             if self.autoencoder is None:
                 return JSONResponse({"error": "No model"}, status_code=400)
             if not hasattr(self.autoencoder, "factor_groups"):
@@ -898,6 +965,9 @@ class TrainerAPI:
 
             Body: {"device": "cuda:1"}
             """
+            guard = self._training_guard()
+            if guard:
+                return guard
             data = await request.json()
             device_str = data.get("device")
             if not device_str:

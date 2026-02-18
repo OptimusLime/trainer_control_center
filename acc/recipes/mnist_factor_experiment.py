@@ -1,23 +1,20 @@
-"""MNIST Factor Experiment — weighted sampling comparison.
+"""MNIST Factor Experiment — no-free vs with-free factor groups.
 
 Branch 0 (vanilla_vae): Standard ConvVAE baseline. Recon + KL only.
 
-Branch 1 (mnist_only): FactorSlotAutoencoder on MNIST only.
-  Recon + KL (annealed) + digit classification. No factor supervision.
+Branch 1 (mnist_only): FactorSlotAutoencoder (with free group) on MNIST only.
+  Recon + KL + digit classification. No factor supervision.
 
-Branches 2a/2b/2c: FactorSlot + curriculum (recon + KL + digit + thickness + slant),
-  forked from the same factor_root. SAME total gradient steps, but different
-  task sampling weights:
-    2a: 90% recon, rest uniform    — tests "recon-heavy" schedule
-    2b: 50% recon, rest uniform    — tests "balanced" schedule
-    2c: uniform (20% each)         — tests naive equal sampling
+Branch 2 (curriculum_free): FactorSlot WITH free group + full curriculum.
+  digit + thickness + slant + 12 free channels.  Uniform task sampling.
 
-This isolates whether the curriculum branch's poor recon (L1=0.147 in
-the uniform run) is caused by recon starvation vs something deeper.
+Branch 3 (curriculum_nofree): FactorSlot WITHOUT free group + full curriculum.
+  digit + thickness + slant only — 20 channels total. Every channel must
+  serve a named factor. Forces the model to actually encode thickness in
+  the thickness channels and slant in the slant channels, instead of
+  dumping everything into free.
 
-Step count: all branches use TOTAL_STEPS gradient updates.  With weighted
-sampling, the number of recon batches varies by weight, but the encoder
-sees the same total number of gradient steps.
+All curriculum branches use uniform task sampling (random.choices, equal weights).
 """
 
 from acc.recipes.base import Recipe, RecipeContext
@@ -33,31 +30,43 @@ from acc.tasks.kl_divergence import KLDivergenceTask
 from acc.tasks.regression import RegressionTask
 
 
-# Factor groups index into the CHANNEL dimension of the spatial bottleneck.
-# 32 channels total, 8x8 spatial → 2048 total flat latent dims.
-FACTOR_GROUPS = [
-    FactorGroup("digit", 0, 8),          # 8 channels for digit identity
-    FactorGroup("thickness", 8, 14),     # 6 channels for stroke thickness
-    FactorGroup("slant", 14, 20),        # 6 channels for slant
-    FactorGroup("free", 20, 32),         # 12 channels for uncontrolled variation
+# WITH free group: 32 channels, 8x8 spatial → 2048 flat latent dims
+FACTOR_GROUPS_FREE = [
+    FactorGroup("digit", 0, 8),          # 8 channels
+    FactorGroup("thickness", 8, 14),     # 6 channels
+    FactorGroup("slant", 14, 20),        # 6 channels
+    FactorGroup("free", 20, 32),         # 12 channels
 ]
 
-# 60k MNIST / batch 64 = 937 batches per epoch
-BATCHES_PER_EPOCH = 937
+# WITHOUT free group: 20 channels, 8x8 spatial → 1280 flat latent dims
+# Every channel belongs to a supervised factor.
+FACTOR_GROUPS_NOFREE = [
+    FactorGroup("digit", 0, 8),          # 8 channels
+    FactorGroup("thickness", 8, 14),     # 6 channels
+    FactorGroup("slant", 14, 20),        # 6 channels
+]
 
-# Total gradient steps per branch.  28,110 = 937 * 3 * 10, i.e. enough for
-# ~10 recon epochs if recon gets ~1/3 of the steps.
-TOTAL_STEPS = BATCHES_PER_EPOCH * 3 * 10
+BATCHES_PER_EPOCH = 937  # 60k / 64
 
-# KL annealing: ramp KL from 0 → full over this many KL-task calls.
-# Lower than before so it finishes even when KL gets a small sampling share.
+# Total gradient steps per branch.
+TOTAL_STEPS = BATCHES_PER_EPOCH * 3 * 10  # 28,110
+
+# KL annealing warmup (in KL-task calls, not total steps).
 KL_WARMUP_STEPS = 1000
 
 
-def _build_factor_model() -> FactorSlotAutoencoder:
+def _build_factor_model_free() -> FactorSlotAutoencoder:
     return FactorSlotAutoencoder(
         in_channels=1,
-        factor_groups=FACTOR_GROUPS,
+        factor_groups=FACTOR_GROUPS_FREE,
+        image_size=32,
+    )
+
+
+def _build_factor_model_nofree() -> FactorSlotAutoencoder:
+    return FactorSlotAutoencoder(
+        in_channels=1,
+        factor_groups=FACTOR_GROUPS_NOFREE,
         image_size=32,
     )
 
@@ -92,8 +101,8 @@ def _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds):
 class MNISTFactorExperiment(Recipe):
     name = "mnist_factor_experiment"
     description = (
-        "Weighted sampling comparison: vanilla, mnist-only, "
-        "curriculum @ 90%/50%/uniform recon weight"
+        "No-free vs with-free factor groups: does removing the free "
+        "channel group force real disentanglement?"
     )
 
     def run(self, ctx: RecipeContext) -> None:
@@ -101,66 +110,6 @@ class MNISTFactorExperiment(Recipe):
         ctx.phase = "Load MNIST 32x32"
         mnist = ctx.load_dataset("mnist_32", lambda: load_mnist(image_size=32))
 
-        # ============================================================
-        # Branch 0: VANILLA VAE BASELINE
-        # ============================================================
-        ctx.phase = "Build vanilla ConvVAE"
-        ctx.create_model(_build_vanilla_vae)
-
-        ctx.phase = "Save vanilla root"
-        vanilla_root = ctx.save_checkpoint("vanilla_root")
-
-        ctx.detach_all_tasks()
-        ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask("kl", mnist, weight=0.5))
-
-        # 2 tasks, uniform sampling → each gets ~50%
-        # TOTAL_STEPS gives ~15 recon epochs at 50%
-        ctx.phase = f"Train vanilla VAE ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-
-        ctx.phase = "Save vanilla checkpoint"
-        ctx.save_checkpoint("vanilla_trained")
-
-        ctx.phase = "Eval vanilla"
-        metrics_vanilla = ctx.evaluate()
-        ctx.log(f"vanilla metrics: {metrics_vanilla}")
-
-        # ============================================================
-        # Branch 1: FACTOR-SLOT, MNIST ONLY
-        # ============================================================
-        ctx.phase = "Build FactorSlotAutoencoder"
-        ctx.create_model(_build_factor_model)
-
-        ctx.phase = "Save factor root"
-        factor_root = ctx.save_checkpoint("factor_root")
-
-        ctx.phase = "Fork -> mnist_only"
-        ctx.fork(factor_root, "mnist_only")
-        ctx.detach_all_tasks()
-
-        ctx.attach_task(ReconstructionTask("recon", mnist))
-        ctx.attach_task(KLDivergenceTask(
-            "kl", mnist, weight=0.5, warmup_steps=KL_WARMUP_STEPS,
-        ))
-        ctx.attach_task(
-            ClassificationTask("digit_classify", mnist, factor_name="digit")
-        )
-
-        # 3 tasks, uniform → recon gets ~33%
-        ctx.phase = f"Train mnist_only ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-
-        ctx.phase = "Save mnist_only checkpoint"
-        ctx.save_checkpoint("mnist_only_trained")
-
-        ctx.phase = "Eval mnist_only"
-        metrics_mnist = ctx.evaluate()
-        ctx.log(f"mnist_only metrics: {metrics_mnist}")
-
-        # ============================================================
-        # Generate synthetic datasets (shared by all curriculum branches)
-        # ============================================================
         ctx.phase = "Generate synthetic datasets"
         thickness_ds = ctx.load_dataset(
             "thickness_synth", lambda: generate_thickness(n=5000, image_size=32)
@@ -170,39 +119,90 @@ class MNISTFactorExperiment(Recipe):
         )
 
         # ============================================================
-        # Curriculum branches: same tasks, different sampling weights
+        # Branch 0: VANILLA VAE BASELINE
         # ============================================================
-        # Weight configs: (tag, recon_share description, weights dict)
-        # Remaining weight after recon is split uniformly among kl,
-        # digit_classify, thickness, slant.
-        curriculum_configs = [
-            ("curr_90recon", "90% recon", {"recon": 36, "kl": 1, "digit_classify": 1, "thickness": 1, "slant": 1}),
-            ("curr_50recon", "50% recon", {"recon": 4, "kl": 1, "digit_classify": 1, "thickness": 1, "slant": 1}),
-            ("curr_uniform", "uniform",   None),  # None = equal weights
-        ]
+        ctx.phase = "Build vanilla ConvVAE"
+        ctx.create_model(_build_vanilla_vae)
+        ctx.save_checkpoint("vanilla_root")
 
-        metrics_curriculum = {}
-        for tag, desc, weights in curriculum_configs:
-            ctx.phase = f"Fork -> {tag}"
-            ctx.fork(factor_root, tag)
-            _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+        ctx.detach_all_tasks()
+        ctx.attach_task(ReconstructionTask("recon", mnist))
+        ctx.attach_task(KLDivergenceTask("kl", mnist, weight=0.5))
 
-            ctx.phase = f"Train {tag} ({TOTAL_STEPS} steps, {desc})"
-            ctx.train(steps=TOTAL_STEPS, lr=1e-3, task_weights=weights)
+        ctx.phase = f"Train vanilla ({TOTAL_STEPS} steps)"
+        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+        ctx.save_checkpoint("vanilla_trained")
 
-            ctx.phase = f"Save {tag} checkpoint"
-            ctx.save_checkpoint(f"{tag}_trained")
+        ctx.phase = "Eval vanilla"
+        m_vanilla = ctx.evaluate()
+        ctx.log(f"vanilla: {m_vanilla}")
 
-            ctx.phase = f"Eval {tag}"
-            metrics_curriculum[tag] = ctx.evaluate()
-            ctx.log(f"{tag} metrics: {metrics_curriculum[tag]}")
+        # ============================================================
+        # Branch 1: FACTOR-SLOT, MNIST ONLY (with free group)
+        # ============================================================
+        ctx.phase = "Build FactorSlot (with free)"
+        ctx.create_model(_build_factor_model_free)
+        factor_root_free = ctx.save_checkpoint("factor_root_free")
+
+        ctx.phase = "Fork -> mnist_only"
+        ctx.fork(factor_root_free, "mnist_only")
+        ctx.detach_all_tasks()
+        ctx.attach_task(ReconstructionTask("recon", mnist))
+        ctx.attach_task(KLDivergenceTask(
+            "kl", mnist, weight=0.5, warmup_steps=KL_WARMUP_STEPS,
+        ))
+        ctx.attach_task(
+            ClassificationTask("digit_classify", mnist, factor_name="digit")
+        )
+
+        ctx.phase = f"Train mnist_only ({TOTAL_STEPS} steps)"
+        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+        ctx.save_checkpoint("mnist_only_trained")
+
+        ctx.phase = "Eval mnist_only"
+        m_mnist = ctx.evaluate()
+        ctx.log(f"mnist_only: {m_mnist}")
+
+        # ============================================================
+        # Branch 2: CURRICULUM WITH FREE GROUP (32ch)
+        # ============================================================
+        ctx.phase = "Fork -> curriculum_free"
+        ctx.fork(factor_root_free, "curriculum_free")
+        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+
+        ctx.phase = f"Train curriculum_free ({TOTAL_STEPS} steps)"
+        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+        ctx.save_checkpoint("curriculum_free_trained")
+
+        ctx.phase = "Eval curriculum_free"
+        m_free = ctx.evaluate()
+        ctx.log(f"curriculum_free: {m_free}")
+
+        # ============================================================
+        # Branch 3: CURRICULUM WITHOUT FREE GROUP (20ch)
+        # ============================================================
+        ctx.phase = "Build FactorSlot (no free)"
+        ctx.create_model(_build_factor_model_nofree)
+        factor_root_nofree = ctx.save_checkpoint("factor_root_nofree")
+
+        ctx.phase = "Fork -> curriculum_nofree"
+        ctx.fork(factor_root_nofree, "curriculum_nofree")
+        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+
+        ctx.phase = f"Train curriculum_nofree ({TOTAL_STEPS} steps)"
+        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+        ctx.save_checkpoint("curriculum_nofree_trained")
+
+        ctx.phase = "Eval curriculum_nofree"
+        m_nofree = ctx.evaluate()
+        ctx.log(f"curriculum_nofree: {m_nofree}")
 
         # ============================================================
         # Summary
         # ============================================================
         ctx.phase = "Complete"
-        ctx.log(f"COMPARISON @ {TOTAL_STEPS} total steps:")
-        ctx.log(f"  vanilla:       {metrics_vanilla}")
-        ctx.log(f"  mnist_only:    {metrics_mnist}")
-        for tag, desc, _ in curriculum_configs:
-            ctx.log(f"  {tag:16s} {metrics_curriculum[tag]}")
+        ctx.log(f"COMPARISON @ {TOTAL_STEPS} steps, uniform sampling:")
+        ctx.log(f"  vanilla:          {m_vanilla}")
+        ctx.log(f"  mnist_only:       {m_mnist}")
+        ctx.log(f"  curriculum_free:  {m_free}")
+        ctx.log(f"  curriculum_nofree:{m_nofree}")
