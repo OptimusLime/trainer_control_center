@@ -61,17 +61,36 @@ body {
   gap: 16px;
 }
 
-.header h1 {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--blue);
-}
-
-.header .status-group {
+/* --- Checkpoint Context Bar --- */
+.checkpoint-context {
   display: flex;
-  gap: 12px;
-  align-items: center;
-  font-size: 12px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.checkpoint-tag {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-bright);
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.checkpoint-tag--empty {
+  color: var(--text-dim);
+}
+.checkpoint-tag--unsaved {
+  color: var(--purple);
+  font-style: italic;
+}
+.checkpoint-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar {
@@ -188,6 +207,135 @@ body {
   position: relative;
   height: 280px;
   width: 100%;
+}
+
+/* --- Recipe Panel --- */
+.recipe-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.recipe-name {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: 13px;
+}
+.recipe-state {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.recipe-branch-info {
+  font-size: 12px;
+  color: var(--purple);
+  margin-bottom: 6px;
+}
+.recipe-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.recipe-phase {
+  font-size: 11px;
+  padding: 2px 0;
+}
+.recipe-phase.done {
+  color: var(--text-muted);
+}
+.recipe-phase.done::before {
+  content: '\2713 ';
+  color: #7ee787;
+}
+.recipe-phase.current {
+  color: #f0883e;
+}
+.recipe-phase.current::before {
+  content: '\25B6 ';
+}
+.recipe-error {
+  color: #f85149;
+  font-size: 11px;
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: #1c0b0b;
+  border-radius: var(--radius-sm);
+}
+.recipe-results {
+  margin-top: 8px;
+  border-top: 1px solid var(--border-dim);
+  padding-top: 8px;
+}
+.recipe-results-label {
+  font-size: 11px;
+  color: var(--purple);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+/* --- Job History --- */
+.job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.job-item {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.1s;
+}
+.job-item:hover {
+  background: var(--bg-hover);
+}
+.job-item.job-selected {
+  border-color: var(--blue);
+  background: var(--bg-hover);
+}
+.job-item-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.job-item-state {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.job-item-steps {
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+.job-item-time {
+  margin-left: auto;
+  font-size: 10px;
+}
+.job-item-losses {
+  font-size: 11px;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.btn-live {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  background: var(--bg-button);
+  color: var(--blue);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11px;
+  text-align: center;
+}
+.btn-live:hover {
+  background: var(--bg-hover);
 }
 
 /* --- Responsive --- */

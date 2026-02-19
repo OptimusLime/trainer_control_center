@@ -706,6 +706,49 @@ class TrainerAPI:
                 "current_id": self.checkpoints.current_id,
             }
 
+        @app.get("/checkpoints/current")
+        async def current_checkpoint():
+            """Return current checkpoint details + the job that trained it.
+
+            The 'relevant job' is the most recent job whose checkpoint_id
+            matches this checkpoint, OR (if none) the most recent job overall
+            that was running when this checkpoint was saved.
+            """
+            has_model = self.autoencoder is not None
+            cp_id = self.checkpoints.current_id if self.checkpoints else None
+
+            # Current checkpoint metadata
+            cp_data = None
+            if cp_id and self.checkpoints:
+                for cp in self.checkpoints.tree():
+                    if cp.id == cp_id:
+                        cp_data = cp.to_dict()
+                        break
+
+            # Find the most relevant job for this checkpoint:
+            # 1. Job that started from this checkpoint (checkpoint_id matches)
+            # 2. Fallback: most recent job
+            relevant_job_id = None
+            all_jobs = self.jobs.list()
+            if cp_id:
+                for j in all_jobs:
+                    if j.checkpoint_id == cp_id:
+                        relevant_job_id = j.id
+                        break
+            # Fallback: most recent job with losses
+            if not relevant_job_id and all_jobs:
+                for j in all_jobs:
+                    if j.losses:
+                        relevant_job_id = j.id
+                        break
+
+            return {
+                "has_model": has_model,
+                "checkpoint": cp_data,
+                "checkpoint_id": cp_id,
+                "relevant_job_id": relevant_job_id,
+            }
+
         # -- Eval Visualization --
         @app.get("/eval/traversals")
         async def eval_traversals(

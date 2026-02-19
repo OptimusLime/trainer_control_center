@@ -8,11 +8,13 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "astro": "^5.8.0",
     "@astrojs/react": "^4.2.1",
+    "@nanostores/react": "^1.0.0",
+    "astro": "^5.8.0",
+    "chart.js": "^4.4.9",
+    "nanostores": "^1.1.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "chart.js": "^4.4.9"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.4",
