@@ -124,77 +124,83 @@ class MNISTFactorExperiment(Recipe):
         # ============================================================
         # Branch 0: BASELINE — 20ch no-free, NO detach (control)
         # ============================================================
-        ctx.phase = "Build baseline (20ch, no detach)"
-        ctx.create_model(_build_nofree)
-        root_nofree = ctx.save_checkpoint(
-            "baseline_nofree_root",
-            description="CONTROL: 20ch, no stop-grad, untrained",
-        )
+        with ctx.branch("baseline_nofree", "20ch, no stop-grad (control)", total=3):
+            ctx.phase = "Build model"
+            ctx.create_model(_build_nofree)
+            root_nofree = ctx.save_checkpoint(
+                "baseline_nofree_root",
+                description="CONTROL: 20ch, no stop-grad, untrained",
+            )
 
-        ctx.phase = "Fork -> baseline_nofree"
-        ctx.fork(root_nofree, "baseline_nofree")
-        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+            ctx.phase = "Fork and attach tasks"
+            ctx.fork(root_nofree, "baseline_nofree")
+            _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
 
-        ctx.phase = f"Train baseline_nofree ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint(
-            "baseline_nofree_trained",
-            description=f"CONTROL: 20ch, no stop-grad, trained {TOTAL_STEPS} steps",
-        )
+            ctx.phase = f"Train ({TOTAL_STEPS} steps)"
+            ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+            ctx.save_checkpoint(
+                "baseline_nofree_trained",
+                description=f"CONTROL: 20ch, no stop-grad, trained {TOTAL_STEPS} steps",
+            )
 
-        ctx.phase = "Eval baseline_nofree"
-        m_baseline = ctx.evaluate()
-        ctx.log(f"baseline_nofree: {m_baseline}")
+            ctx.phase = "Evaluate"
+            m_baseline = ctx.evaluate()
+            ctx.record_results("baseline_nofree", m_baseline)
+            ctx.log(f"baseline_nofree: {m_baseline}")
 
         # ============================================================
         # Branch 1: STOP-GRAD 20ch — same arch, detach_factor_grad=True
         # ============================================================
-        ctx.phase = "Build stopgrad_20ch"
-        ctx.create_model(_build_stopgrad_20ch)
-        root_sg20 = ctx.save_checkpoint(
-            "stopgrad_20ch_root",
-            description="EXPERIMENT: 20ch, stop-grad ON, untrained",
-        )
+        with ctx.branch("stopgrad_20ch", "20ch, stop-grad ON", total=3):
+            ctx.phase = "Build model"
+            ctx.create_model(_build_stopgrad_20ch)
+            root_sg20 = ctx.save_checkpoint(
+                "stopgrad_20ch_root",
+                description="EXPERIMENT: 20ch, stop-grad ON, untrained",
+            )
 
-        ctx.phase = "Fork -> stopgrad_20ch"
-        ctx.fork(root_sg20, "stopgrad_20ch")
-        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+            ctx.phase = "Fork and attach tasks"
+            ctx.fork(root_sg20, "stopgrad_20ch")
+            _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
 
-        ctx.phase = f"Train stopgrad_20ch ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint(
-            "stopgrad_20ch_trained",
-            description=f"EXPERIMENT: 20ch, stop-grad ON, trained {TOTAL_STEPS} steps",
-        )
+            ctx.phase = f"Train ({TOTAL_STEPS} steps)"
+            ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+            ctx.save_checkpoint(
+                "stopgrad_20ch_trained",
+                description=f"EXPERIMENT: 20ch, stop-grad ON, trained {TOTAL_STEPS} steps",
+            )
 
-        ctx.phase = "Eval stopgrad_20ch"
-        m_sg20 = ctx.evaluate()
-        ctx.log(f"stopgrad_20ch: {m_sg20}")
+            ctx.phase = "Evaluate"
+            m_sg20 = ctx.evaluate()
+            ctx.record_results("stopgrad_20ch", m_sg20)
+            ctx.log(f"stopgrad_20ch: {m_sg20}")
 
         # ============================================================
         # Branch 2: STOP-GRAD HALF — 10ch, detach_factor_grad=True
         # ============================================================
-        ctx.phase = "Build stopgrad_half (10ch)"
-        ctx.create_model(_build_stopgrad_half)
-        root_sghalf = ctx.save_checkpoint(
-            "stopgrad_half_root",
-            description="EXPERIMENT: 10ch, stop-grad ON, half capacity, untrained",
-        )
+        with ctx.branch("stopgrad_half", "10ch, stop-grad ON, half capacity", total=3):
+            ctx.phase = "Build model"
+            ctx.create_model(_build_stopgrad_half)
+            root_sghalf = ctx.save_checkpoint(
+                "stopgrad_half_root",
+                description="EXPERIMENT: 10ch, stop-grad ON, half capacity, untrained",
+            )
 
-        ctx.phase = "Fork -> stopgrad_half"
-        ctx.fork(root_sghalf, "stopgrad_half")
-        _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
+            ctx.phase = "Fork and attach tasks"
+            ctx.fork(root_sghalf, "stopgrad_half")
+            _attach_curriculum_tasks(ctx, mnist, thickness_ds, slant_ds)
 
-        ctx.phase = f"Train stopgrad_half ({TOTAL_STEPS} steps)"
-        ctx.train(steps=TOTAL_STEPS, lr=1e-3)
-        ctx.save_checkpoint(
-            "stopgrad_half_trained",
-            description=f"EXPERIMENT: 10ch, stop-grad ON, half capacity, trained {TOTAL_STEPS} steps",
-        )
+            ctx.phase = f"Train ({TOTAL_STEPS} steps)"
+            ctx.train(steps=TOTAL_STEPS, lr=1e-3)
+            ctx.save_checkpoint(
+                "stopgrad_half_trained",
+                description=f"EXPERIMENT: 10ch, stop-grad ON, half capacity, trained {TOTAL_STEPS} steps",
+            )
 
-        ctx.phase = "Eval stopgrad_half"
-        m_sghalf = ctx.evaluate()
-        ctx.log(f"stopgrad_half: {m_sghalf}")
+            ctx.phase = "Evaluate"
+            m_sghalf = ctx.evaluate()
+            ctx.record_results("stopgrad_half", m_sghalf)
+            ctx.log(f"stopgrad_half: {m_sghalf}")
 
         # ============================================================
         # Summary

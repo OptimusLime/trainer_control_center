@@ -5,6 +5,7 @@ trains, evaluates, and forks again. The checkpoint tree IS the experiment.
 """
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Callable
@@ -45,6 +46,12 @@ class RecipeContext:
         self._phases_completed: list[str] = []
         self._checkpoints_created: list[str] = []
         self._stopped = False
+        # Branch tracking
+        self._current_branch: Optional[str] = None
+        self._branch_index: int = 0
+        self._total_branches: int = 0
+        self._branches: list[dict] = []  # [{name, description, phases, results}]
+        self._branch_results: dict = {}  # branch_name -> eval results
 
     @property
     def phase(self) -> str:
@@ -55,6 +62,44 @@ class RecipeContext:
         if self._phase != "initializing":
             self._phases_completed.append(self._phase)
         self._phase = name
+
+    @contextmanager
+    def branch(self, name: str, description: str = "", total: int = 0):
+        """Declare a branch context. Groups phases under a named branch.
+
+        Usage:
+            with ctx.branch("baseline", "20ch, no stop-grad", total=3):
+                ctx.phase = "Build model"
+                ...
+        """
+        # Auto-detect total from first call if not set
+        if total > 0 and self._total_branches == 0:
+            self._total_branches = total
+        self._branch_index += 1
+        self._current_branch = name
+        # Flush current phase so setup phases before this branch are counted
+        if self._phase != "initializing":
+            self._phases_completed.append(self._phase)
+            self._phase = "initializing"
+        branch_entry = {
+            "name": name,
+            "description": description,
+            "phase_start": len(self._phases_completed),
+        }
+        self._branches.append(branch_entry)
+        try:
+            yield
+        finally:
+            # Flush the last phase inside the branch
+            if self._phase != "initializing":
+                self._phases_completed.append(self._phase)
+                self._phase = "initializing"
+            branch_entry["phase_end"] = len(self._phases_completed)
+            self._current_branch = None
+
+    def record_results(self, branch_name: str, results: dict) -> None:
+        """Store eval results for a branch. Shown in comparison summary."""
+        self._branch_results[branch_name] = results
 
     @property
     def current_checkpoint_id(self) -> Optional[str]:
@@ -245,6 +290,12 @@ class RecipeJob:
     checkpoints_created: list[str] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.now)
     error: Optional[str] = None
+    # Branch tracking
+    current_branch: Optional[str] = None
+    branch_index: int = 0
+    total_branches: int = 0
+    branches: list[dict] = field(default_factory=list)
+    branch_results: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -256,4 +307,9 @@ class RecipeJob:
             "checkpoints_created": self.checkpoints_created,
             "started_at": self.started_at.isoformat(),
             "error": self.error,
+            "current_branch": self.current_branch,
+            "branch_index": self.branch_index,
+            "total_branches": self.total_branches,
+            "branches": self.branches,
+            "branch_results": self.branch_results,
         }

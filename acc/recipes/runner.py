@@ -45,6 +45,11 @@ class RecipeRunner:
             finally:
                 job.phases_completed = list(ctx._phases_completed)
                 job.checkpoints_created = list(ctx._checkpoints_created)
+                job.branches = list(ctx._branches)
+                job.branch_results = dict(ctx._branch_results)
+                job.current_branch = ctx._current_branch
+                job.branch_index = ctx._branch_index
+                job.total_branches = ctx._total_branches
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -66,6 +71,11 @@ class RecipeRunner:
             self._current_job.current_phase = self._current_ctx.phase
             self._current_job.phases_completed = list(self._current_ctx._phases_completed)
             self._current_job.checkpoints_created = list(self._current_ctx._checkpoints_created)
+            self._current_job.current_branch = self._current_ctx._current_branch
+            self._current_job.branch_index = self._current_ctx._branch_index
+            self._current_job.total_branches = self._current_ctx._total_branches
+            self._current_job.branches = list(self._current_ctx._branches)
+            self._current_job.branch_results = dict(self._current_ctx._branch_results)
         return self._current_job
 
     def wait(self, timeout: float = None) -> Optional[RecipeJob]:

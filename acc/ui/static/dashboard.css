@@ -85,3 +85,16 @@ body { font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; background: #0d11
 .metric-mid { color: #f0883e; }
 .metric-bad { color: #f85149; }
 .weight-input { width: 50px !important; display: inline !important; padding: 2px 4px !important; }
+/* Branch-grouped recipe progress */
+.branch-group { border-left: 2px solid #30363d; margin: 6px 0 6px 4px; padding-left: 8px; }
+.branch-group.branch-active { border-left-color: #f0883e; }
+.branch-group.branch-done { border-left-color: #7ee787; }
+.branch-header { color: #d2a8ff; font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+.branch-indicator { color: #f0883e; font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+/* Recipe comparison table */
+.recipe-comparison { margin-top: 10px; border-top: 1px solid #30363d; padding-top: 8px; }
+.comparison-header { color: #d2a8ff; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.comparison-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.comparison-table th { text-align: left; color: #8b949e; font-weight: 600; padding: 3px 6px; border-bottom: 1px solid #30363d; }
+.comparison-table td { padding: 3px 6px; border-bottom: 1px solid #21262d; color: #c9d1d9; }
+.comparison-table .comparison-best { color: #7ee787; font-weight: 600; }

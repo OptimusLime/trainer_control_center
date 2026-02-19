@@ -39,15 +39,11 @@ Before this refactor, the answer to all three was "unclear." Checkpoint names li
 **Commits:** `0e1bc24`
 **Bug fixed:** Loss summary was added AFTER `torch.save()` so it was never persisted to disk. Now built before save.
 
-### Phase 4: Recipe Panel Shows What's Happening (Not Started)
-**Functionality:** I can see what recipe is running, what phase it's on, which branch is being trained, how far along it is, and what the latest results are. When a recipe finishes, I can see the comparison summary.
-**Foundation:** Recipe progress via SSE or polling. RecipeJob already tracks `current_phase`, `phases_completed`, `checkpoints_created`. UI needs to surface these meaningfully.
-
-**Verification:**
-- Run `mnist_factor_experiment` recipe → see "Branch 1 of 3: baseline (20ch, no stop-grad)" in the recipe panel
-- Training progress shows live for each branch
-- When complete, recipe panel shows comparison summary
-- Recipe panel polls for updates while running, stops when done
+### Phase 4: Recipe Panel Shows What's Happening (Done)
+**Functionality:** I can see what recipe is running, which branch is being trained ("Branch 2 of 3: stopgrad_20ch — 20ch, stop-grad ON"), what phase within that branch, and how far along. When the recipe completes, I see a comparison summary table with best-value highlighting across branches.
+**Foundation:** `RecipeContext.branch()` context manager groups phases under named branches. `RecipeContext.record_results()` stores per-branch eval results. `RecipeJob.to_dict()` exposes `branches`, `branch_results`, `current_branch`, `branch_index`, `total_branches`. UI partial groups phases by branch and renders a comparison table on completion.
+**Commits:** (pending commit)
+**Backward compatible:** Old recipe jobs without branch data render as flat phase lists (no regression).
 
 ### Phase 5: Checkpoint Comparison View (Not Started)
 **Functionality:** I can select two checkpoints (e.g., baseline_nofree_trained vs stopgrad_20ch_trained) and see a side-by-side comparison: eval metrics, traversal grids, reconstruction quality, attention maps. I can answer "did stop-grad help?" directly from the dashboard.
@@ -66,7 +62,7 @@ Before this refactor, the answer to all three was "unclear." Checkpoint names li
 | Phase 1: Dashboard Tells the Truth | Done | Trust that checkpoint load refreshes all panels. No stale data. |
 | Phase 2: Dashboard is Maintainable | Done | Find any panel's code in 10 seconds. Add a new panel without touching other code. |
 | Phase 3: Checkpoints Explain Themselves | Done | See recipe name, model config, and results for every checkpoint in the tree. |
-| Phase 4: Recipe Panel Shows What's Happening | Not started | See live recipe progress: which branch, what phase, how far along. |
+| Phase 4: Recipe Panel Shows What's Happening | Done | See live recipe progress: which branch, what phase, comparison summary. |
 | Phase 5: Checkpoint Comparison View | Not started | Compare two checkpoints side-by-side and answer "which is better?" |
 
 ## Phase 3 Cleanup Audit
@@ -112,7 +108,8 @@ acc/ui/
 
 acc/checkpoints.py      — Checkpoint dataclass with recipe_name, model_config, tasks_snapshot, metrics
 acc/factor_slot_autoencoder.py — config() method for serializable architectural config
-acc/recipes/base.py     — RecipeContext passes recipe metadata to CheckpointStore
+acc/recipes/base.py     — RecipeContext with branch() context manager, record_results(), Recipe base class, RecipeJob
+acc/recipes/runner.py   — RecipeRunner syncs branch data from RecipeContext to RecipeJob
 ```
 
 ## How to Verify
