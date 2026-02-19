@@ -142,6 +142,15 @@ import LossChart from '../components/LossChart.tsx';
         <div class="empty">Select a checkpoint to compare against the current model</div>
       </div>
 
+      <!-- Weight Features -->
+      <div class="panel" id="features-panel">
+        <div class="panel-header">
+          <h3>Weight Features</h3>
+          <button class="btn-action" id="btn-features">Load Features</button>
+        </div>
+        <div class="empty">Load features to visualize encoder weight patterns across checkpoints</div>
+      </div>
+
       <!-- M-UI-5: Add Task -->
       <div class="panel" id="add-task-panel">
         <h3>Add Task</h3>
@@ -232,6 +241,8 @@ import LossChart from '../components/LossChart.tsx';
     $evalResults, $evalLoading, $evalError,
     $reconstructions, $reconLoading,
     $checkpointComparison, $compareLoading,
+    $evalSiblings,
+    $featureSiblings, $featureSiblingsLoading,
     $checkpointTree, $checkpointCurrentId,
     $tasks, $registryTasks, $datasets, $datasetSamples,
     $generators, $device, $recipes,
@@ -246,6 +257,7 @@ import LossChart from '../components/LossChart.tsx';
     startTraining, stopTraining, setDevice,
     runRecipe, stopRecipe,
     fetchTraversals, fetchSortByFactor, fetchAttentionMaps,
+    fetchEvalSiblings, fetchFeatureSiblings,
   } from '../lib/store';
   import { metricClass } from '../lib/theme';
   import { HEALTH_COLORS, HEALTH_FALLBACK, STATUS_COLORS, TREND_ICONS } from '../lib/theme';
@@ -452,35 +464,114 @@ import LossChart from '../components/LossChart.tsx';
     (btnEval as HTMLButtonElement).disabled = loading;
   });
 
-  $evalResults.subscribe(data => {
-    if (!data) return;
-    const tasks = Object.entries(data);
+  // Higher-is-better metrics (used for sibling comparison highlighting)
+  const HIGHER_IS_BETTER = new Set([
+    'accuracy', 'psnr', 'ufr', 'disentanglement', 'completeness',
+    'sparsity_variance', 'effective_rank',
+  ]);
+
+  function renderEvalPanel() {
+    const evalData = $evalResults.get();
+    const siblings = $evalSiblings.get();
+
+    if (!evalData) return;
+    const tasks = Object.entries(evalData);
     if (tasks.length === 0) return;
 
-    const rows = tasks.flatMap(([taskName, metrics]) =>
-      Object.entries(metrics).map(([metricName, value]) => {
-        const cls = metricClass(metricName, value);
-        return `<tr>
-          <td>${esc(taskName)}</td>
-          <td>${esc(metricName)}</td>
-          <td class="${cls ? 'metric-' + cls : ''}">${value.toFixed(4)}</td>
-        </tr>`;
-      })
-    ).join('');
+    // If we have sibling checkpoints with eval data, show comparison table
+    const hasSiblings = siblings && siblings.siblings.length > 1
+      && siblings.siblings.some(s => Object.keys(s.eval_results).length > 0);
 
-    evalPanel.innerHTML = `
-      <div class="panel-header">
-        <h3>Eval Metrics</h3>
-        <button class="btn-action" id="btn-eval">Run Eval</button>
-      </div>
-      <table class="loss-summary-table">
-        <thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    `;
+    if (hasSiblings) {
+      const sibs = siblings!.siblings;
+      const currentId = siblings!.current_id;
+
+      // Collect all task+metric combos across all siblings
+      const allRows: { task: string; metric: string }[] = [];
+      const seen = new Set<string>();
+      for (const sib of sibs) {
+        for (const [taskName, metrics] of Object.entries(sib.eval_results)) {
+          for (const metricName of Object.keys(metrics)) {
+            const key = `${taskName}|${metricName}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              allRows.push({ task: taskName, metric: metricName });
+            }
+          }
+        }
+      }
+
+      // Header: Task | Metric | checkpoint1 | checkpoint2 | ...
+      const headerCells = sibs.map(s => {
+        const isCurrent = s.id === currentId;
+        const label = esc(s.tag);
+        return `<th class="${isCurrent ? 'sibling-current' : ''}">${label}</th>`;
+      }).join('');
+
+      const bodyRows = allRows.map(({ task, metric }) => {
+        // Collect values for this metric across all siblings
+        const values = sibs.map(s => s.eval_results[task]?.[metric] ?? null);
+        const validValues = values.filter((v): v is number => v !== null);
+        const hib = HIGHER_IS_BETTER.has(metric);
+        const bestVal = validValues.length > 0
+          ? (hib ? Math.max(...validValues) : Math.min(...validValues))
+          : null;
+
+        const cells = sibs.map((s, i) => {
+          const val = values[i];
+          const isCurrent = s.id === currentId;
+          if (val === null) return `<td class="${isCurrent ? 'sibling-current' : ''}">-</td>`;
+          const isBest = bestVal !== null && val === bestVal && validValues.length > 1;
+          const cls = [
+            isCurrent ? 'sibling-current' : '',
+            isBest ? 'sibling-best' : '',
+          ].filter(Boolean).join(' ');
+          return `<td class="${cls}">${val.toFixed(4)}</td>`;
+        }).join('');
+
+        return `<tr><td>${esc(task)}</td><td>${esc(metric)}</td>${cells}</tr>`;
+      }).join('');
+
+      evalPanel.innerHTML = `
+        <div class="panel-header">
+          <h3>Eval Metrics</h3>
+          <button class="btn-action" id="btn-eval">Run Eval</button>
+        </div>
+        <table class="loss-summary-table sibling-table">
+          <thead><tr><th>Task</th><th>Metric</th>${headerCells}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      `;
+    } else {
+      // No siblings — single-column eval table
+      const rows = tasks.flatMap(([taskName, metrics]) =>
+        Object.entries(metrics).map(([metricName, value]) => {
+          const cls = metricClass(metricName, value);
+          return `<tr>
+            <td>${esc(taskName)}</td>
+            <td>${esc(metricName)}</td>
+            <td class="${cls ? 'metric-' + cls : ''}">${value.toFixed(4)}</td>
+          </tr>`;
+        })
+      ).join('');
+
+      evalPanel.innerHTML = `
+        <div class="panel-header">
+          <h3>Eval Metrics</h3>
+          <button class="btn-action" id="btn-eval">Run Eval</button>
+        </div>
+        <table class="loss-summary-table">
+          <thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
     // Re-attach button handler
     document.getElementById('btn-eval')!.addEventListener('click', () => runEval());
-  });
+  }
+
+  $evalResults.subscribe(() => renderEvalPanel());
+  $evalSiblings.subscribe(() => renderEvalPanel());
 
   $evalError.subscribe(err => {
     if (!err) return;
@@ -751,6 +842,58 @@ import LossChart from '../components/LossChart.tsx';
     newBtn.addEventListener('click', () => {
       if (newSelect.value) runCheckpointComparison(newSelect.value);
     });
+  });
+
+  // --- Weight Features Panel ---
+  const featuresPanel = document.getElementById('features-panel')!;
+  const btnFeatures = document.getElementById('btn-features')!;
+
+  btnFeatures.addEventListener('click', () => fetchFeatureSiblings());
+
+  $featureSiblingsLoading.subscribe(loading => {
+    btnFeatures.textContent = loading ? 'Loading...' : 'Load Features';
+    (btnFeatures as HTMLButtonElement).disabled = loading;
+  });
+
+  $featureSiblings.subscribe(data => {
+    if (!data || data.siblings.length === 0) return;
+
+    const { siblings, current_id, n_features, image_shape } = data;
+    const imgW = image_shape[1] || 28;
+    const imgH = image_shape[0] || 28;
+
+    // Show features as grid: one row per sibling checkpoint, columns = feature index
+    // For 64 features, show 8x8 grid per checkpoint
+    const gridCols = 8;
+    const gridRows = Math.ceil(n_features / gridCols);
+
+    let html = `
+      <div class="panel-header">
+        <h3>Weight Features</h3>
+        <button class="btn-action" id="btn-features">Load Features</button>
+      </div>
+      <div class="features-comparison">
+    `;
+
+    for (const sib of siblings) {
+      const isCurrent = sib.id === current_id;
+      const label = esc(sib.tag);
+      const cls = isCurrent ? ' features-current' : '';
+
+      html += `<div class="features-block${cls}">`;
+      html += `<div class="features-label">${label}</div>`;
+      html += `<div class="features-grid" style="grid-template-columns: repeat(${gridCols}, ${imgW}px);">`;
+      for (let i = 0; i < n_features && i < sib.features.length; i++) {
+        html += `<img src="data:image/png;base64,${sib.features[i]}" width="${imgW}" height="${imgH}" class="feature-img" title="Feature ${i}" />`;
+      }
+      html += `</div></div>`;
+    }
+
+    html += `</div>`;
+    featuresPanel.innerHTML = html;
+
+    // Re-attach button handler
+    document.getElementById('btn-features')!.addEventListener('click', () => fetchFeatureSiblings());
   });
 
   // --- M-UI-5: Tasks Panel ---

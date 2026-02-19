@@ -545,6 +545,46 @@ body {
   color: var(--text-muted);
 }
 
+/* --- Sibling comparison table --- */
+.sibling-table th.sibling-current,
+.sibling-table td.sibling-current {
+  background: rgba(56, 139, 253, 0.08);
+}
+.sibling-table td.sibling-best {
+  color: #7ee787;
+  font-weight: 600;
+}
+
+/* --- Weight Features --- */
+.features-comparison {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: auto;
+}
+.features-block {
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+.features-block.features-current {
+  border: 1px solid var(--blue);
+}
+.features-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 6px;
+}
+.features-grid {
+  display: grid;
+  gap: 1px;
+}
+.feature-img {
+  image-rendering: pixelated;
+  display: block;
+}
+
 /* --- M-UI-5: Tasks --- */
 .task-list {
   display: flex;

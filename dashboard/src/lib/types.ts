@@ -217,3 +217,31 @@ export interface EvalCheckpointResponse {
   tag: string;
   metrics: EvalMetrics;
 }
+
+export interface SiblingCheckpoint {
+  id: string;
+  tag: string;
+  description: string | null;
+  eval_results: EvalMetrics;
+}
+
+export interface EvalSiblingsResponse {
+  siblings: SiblingCheckpoint[];
+  current_id: string | null;
+}
+
+// --- Features ---
+
+export interface FeatureSibling {
+  id: string;
+  tag: string;
+  description: string | null;
+  features: string[];  // base64 PNG per feature
+}
+
+export interface FeatureSiblingsResponse {
+  siblings: FeatureSibling[];
+  current_id: string | null;
+  n_features: number;
+  image_shape: number[];
+}

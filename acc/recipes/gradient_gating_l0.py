@@ -1,14 +1,14 @@
-"""Gradient Gating Level 0 — Linear Autoencoder baseline.
+"""Gradient Gating Level 0 — Linear Autoencoder temperature sweep.
 
-Simplest possible CGG experiment: linear AE on MNIST, standard vs gated.
-Two branches, same model architecture, same training schedule, only
-difference is whether gradient gating is attached to the encoder.
+CGG experiment: linear AE on MNIST with varying gate temperatures.
+Four branches, same architecture, same training schedule:
+  - control:  no gating
+  - soft:     temperature=1.0  (mild competition)
+  - medium:   temperature=0.3  (sharp competition)
+  - hard:     temperature=0.1  (near winner-take-all)
 
-This validates:
-1. LinearAutoencoder conforms to ModelOutput protocol
-2. CompetitiveGradientGating hooks fire correctly during training
-3. Both conditions converge (gated doesn't diverge)
-4. Branch comparison shows L1/PSNR for both conditions
+Evaluates reconstruction quality AND specialization metrics
+(weight diversity, activation sparsity, effective rank) for each.
 """
 
 from acc.recipes.base import Recipe, RecipeContext
@@ -16,12 +16,25 @@ from acc.models.linear_ae import LinearAutoencoder
 from acc.gradient_gating import attach_competitive_gating
 from acc.dataset import load_mnist
 from acc.tasks.reconstruction import ReconstructionTask
+from acc.tasks.weight_diversity import WeightDiversityTask
+from acc.tasks.activation_sparsity import ActivationSparsityTask
+from acc.tasks.effective_rank import EffectiveRankTask
 
 IN_DIM = 784       # 28 * 28
 HIDDEN_DIM = 64
 TRAINING_STEPS = 25000
 LR = 1e-3
 BATCH_SIZE = 128
+ENCODER_LAYER = "encoder.0"  # nn.Linear(784, 64)
+
+# Temperature sweep: (tag, description, temperature_or_None)
+# None = no gating (control)
+CONDITIONS = [
+    ("control",    "No gating (control)",       None),
+    ("soft-t1.0",  "Gated, temperature=1.0",    1.0),
+    ("med-t0.3",   "Gated, temperature=0.3",    0.3),
+    ("hard-t0.1",  "Gated, temperature=0.1",    0.1),
+]
 
 
 def _build_linear_ae() -> LinearAutoencoder:
@@ -35,80 +48,64 @@ def _build_linear_ae() -> LinearAutoencoder:
 class GradientGatingL0(Recipe):
     name = "gradient_gating_l0"
     description = (
-        "Linear AE on MNIST: standard SGD vs competitive gradient gating. "
-        "Tests whether activation-proportional gradient scaling changes "
-        "reconstruction quality in the simplest possible setting."
+        "Linear AE on MNIST: temperature sweep of competitive gradient gating. "
+        "control / soft(t=1.0) / medium(t=0.3) / hard(t=0.1). "
+        "Compares reconstruction + specialization metrics."
     )
 
     def run(self, ctx: RecipeContext) -> None:
-        # === Common setup ===
         ctx.phase = "Load MNIST 28x28"
         mnist = ctx.load_dataset("mnist_28", lambda: load_mnist(image_size=28))
 
-        # ============================================================
-        # Branch 0: STANDARD — no gating (control)
-        # ============================================================
-        with ctx.branch("standard", "Linear AE, no gating (control)", total=2):
-            ctx.phase = "Build model"
-            ctx.create_model(_build_linear_ae)
+        n_conditions = len(CONDITIONS)
+        results = {}
 
-            ctx.phase = "Attach reconstruction task"
-            ctx.detach_all_tasks()
-            ctx.attach_task(ReconstructionTask("recon", mnist))
+        for tag, desc, temperature in CONDITIONS:
+            with ctx.branch(tag, desc, total=n_conditions):
+                ctx.phase = "Build model"
+                ctx.create_model(_build_linear_ae)
 
-            ctx.phase = f"Train ({TRAINING_STEPS} steps)"
-            ctx.train(
-                steps=TRAINING_STEPS,
-                lr=LR,
-                batch_size=BATCH_SIZE,
-            )
+                # Attach gating if this is a gated condition
+                gating = None
+                if temperature is not None:
+                    ctx.phase = f"Attach gating (t={temperature})"
+                    gating = attach_competitive_gating(
+                        ctx._api.autoencoder,
+                        layer_configs={
+                            ENCODER_LAYER: {
+                                "temperature": temperature,
+                                "gate_strength": 1.0,
+                            },
+                        },
+                    )
 
-            ctx.phase = "Evaluate"
-            m_standard = ctx.evaluate()
-            ctx.record_results("standard", m_standard)
-            ctx.save_checkpoint("standard-baseline", description="Linear AE, no gating (control)")
-            ctx.log(f"standard: {m_standard}")
+                ctx.phase = "Attach tasks"
+                ctx.detach_all_tasks()
+                ctx.attach_task(ReconstructionTask("recon", mnist))
+                ctx.attach_task(WeightDiversityTask("weight_div", mnist, ENCODER_LAYER))
+                ctx.attach_task(ActivationSparsityTask("act_sparsity", mnist, ENCODER_LAYER))
+                ctx.attach_task(EffectiveRankTask("eff_rank", mnist, ENCODER_LAYER))
 
-        # ============================================================
-        # Branch 1: GATED — competitive gradient gating on encoder
-        # ============================================================
-        with ctx.branch("gated", "Linear AE, gradient gating on encoder", total=2):
-            ctx.phase = "Build model"
-            ctx.create_model(_build_linear_ae)
+                ctx.phase = f"Train ({TRAINING_STEPS} steps)"
+                ctx.train(
+                    steps=TRAINING_STEPS,
+                    lr=LR,
+                    batch_size=BATCH_SIZE,
+                )
 
-            ctx.phase = "Attach gating"
-            # Gate the encoder's Linear layer (encoder.0 is the nn.Linear)
-            gating = attach_competitive_gating(
-                ctx._api.autoencoder,
-                layer_configs={
-                    "encoder.0": {"temperature": 1.0, "gate_strength": 1.0},
-                },
-            )
+                ctx.phase = "Evaluate"
+                metrics = ctx.evaluate()
+                ctx.record_results(tag, metrics)
+                ctx.save_checkpoint(tag, description=desc, eval_results=metrics)
+                ctx.log(f"{tag}: {metrics}")
+                results[tag] = metrics
 
-            ctx.phase = "Attach reconstruction task"
-            ctx.detach_all_tasks()
-            ctx.attach_task(ReconstructionTask("recon", mnist))
+                if gating is not None:
+                    gating.remove()
 
-            ctx.phase = f"Train ({TRAINING_STEPS} steps)"
-            ctx.train(
-                steps=TRAINING_STEPS,
-                lr=LR,
-                batch_size=BATCH_SIZE,
-            )
-
-            ctx.phase = "Evaluate"
-            m_gated = ctx.evaluate()
-            ctx.record_results("gated", m_gated)
-            ctx.save_checkpoint("gated-cgg", description="Linear AE, gradient gating on encoder")
-            ctx.log(f"gated: {m_gated}")
-
-            # Cleanup hooks
-            gating.remove()
-
-        # ============================================================
         # Summary
-        # ============================================================
         ctx.phase = "Complete"
-        ctx.log(f"GRADIENT GATING L0 @ {TRAINING_STEPS} steps:")
-        ctx.log(f"  standard (no gating): {m_standard}")
-        ctx.log(f"  gated (temp=1.0, strength=1.0): {m_gated}")
+        ctx.log(f"GRADIENT GATING L0 TEMPERATURE SWEEP @ {TRAINING_STEPS} steps:")
+        for tag, _, temp in CONDITIONS:
+            t_str = f"t={temp}" if temp is not None else "no gating"
+            ctx.log(f"  {tag} ({t_str}): {results[tag]}")

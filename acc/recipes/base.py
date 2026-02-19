@@ -144,7 +144,8 @@ class RecipeContext:
         self._api.trainer = None
 
     def save_checkpoint(self, tag: str, parent_id: Optional[str] = None,
-                        description: Optional[str] = None) -> str:
+                        description: Optional[str] = None,
+                        eval_results: Optional[dict] = None) -> str:
         """Save current state, return checkpoint_id.
 
         Recipe name, model config, task snapshot, and loss summary are all
@@ -155,6 +156,9 @@ class RecipeContext:
             parent_id: Explicit parent checkpoint ID. If None, uses the
                 checkpoint store's current lineage (last saved/loaded).
             description: Human-readable purpose of this checkpoint.
+            eval_results: Eval metrics dict {task_name: {metric: value}}.
+                Stored in checkpoint so sibling comparisons don't require
+                re-evaluation.
         """
         if self._api.autoencoder is None:
             raise RuntimeError("No model to checkpoint.")
@@ -175,6 +179,17 @@ class RecipeContext:
                 }
                 metrics["loss_history"] = j.losses
                 break
+
+        # Store eval results so sibling comparisons work from checkpoint metadata
+        if eval_results is not None:
+            # Normalize EvalMetric enum keys to strings for JSON serialization
+            serialized = {}
+            for task_name, task_metrics in eval_results.items():
+                serialized[task_name] = {
+                    (k.value if hasattr(k, 'value') else str(k)): v
+                    for k, v in task_metrics.items()
+                }
+            metrics["eval_results"] = serialized
 
         cp = self._api.checkpoints.save(
             self._api.autoencoder,

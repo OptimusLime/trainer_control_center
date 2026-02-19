@@ -33,6 +33,8 @@ import type {
   TraversalsResponse,
   SortByFactorResponse,
   AttentionMapsResponse,
+  EvalSiblingsResponse,
+  FeatureSiblingsResponse,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,9 @@ export interface DashboardState {
   reconLoading: boolean;
   checkpointComparison: { current: EvalMetrics; compare: EvalCheckpointResponse } | null;
   compareLoading: boolean;
+  evalSiblings: EvalSiblingsResponse | null;
+  featureSiblings: FeatureSiblingsResponse | null;
+  featureSiblingsLoading: boolean;
   // M-UI-5: Tasks, datasets, training, device
   tasks: TaskDescription[];
   registryTasks: RegistryTaskInfo[];
@@ -96,6 +101,7 @@ const INITIAL: DashboardState = {
   reconLoading: false,
   checkpointComparison: null,
   compareLoading: false,
+  evalSiblings: null,
   tasks: [],
   registryTasks: [],
   datasets: [],
@@ -227,6 +233,8 @@ async function tick(force = false) {
       if (caps?.traversals) fetchTraversals();
       if (caps?.sort_by_factor) fetchSortByFactor();
       if (caps?.attention_maps) fetchAttentionMaps();
+      fetchEvalSiblings();
+      fetchFeatureSiblings();
     }
   } finally {
     polling = false;
@@ -271,6 +279,9 @@ export const $reconstructions = computed($dashboard, s => s.reconstructions);
 export const $reconLoading = computed($dashboard, s => s.reconLoading);
 export const $checkpointComparison = computed($dashboard, s => s.checkpointComparison);
 export const $compareLoading = computed($dashboard, s => s.compareLoading);
+export const $evalSiblings = computed($dashboard, s => s.evalSiblings);
+export const $featureSiblings = computed($dashboard, s => s.featureSiblings);
+export const $featureSiblingsLoading = computed($dashboard, s => s.featureSiblingsLoading);
 
 // M-UI-5 slices
 export const $tasks = computed($dashboard, s => s.tasks);
@@ -301,8 +312,34 @@ export async function runEval() {
   const cur = $dashboard.get();
   if (result) {
     $dashboard.set({ ...cur, evalResults: result, evalLoading: false });
+    // Also fetch sibling comparison data (non-blocking)
+    fetchEvalSiblings();
   } else {
     $dashboard.set({ ...cur, evalLoading: false, evalError: 'Eval failed (model busy or no trainer)' });
+  }
+}
+
+export async function fetchEvalSiblings() {
+  const result = await fetchJSON<EvalSiblingsResponse>('/eval/siblings');
+  const cur = $dashboard.get();
+  if (result && result.siblings.length > 1) {
+    // Only show if there are actual siblings to compare (>1 means not just self)
+    $dashboard.set({ ...cur, evalSiblings: result });
+  } else {
+    $dashboard.set({ ...cur, evalSiblings: null });
+  }
+}
+
+export async function fetchFeatureSiblings() {
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, featureSiblingsLoading: true });
+
+  const result = await fetchJSON<FeatureSiblingsResponse>('/eval/features/siblings');
+  const cur = $dashboard.get();
+  if (result && result.siblings.length > 1) {
+    $dashboard.set({ ...cur, featureSiblings: result, featureSiblingsLoading: false });
+  } else {
+    $dashboard.set({ ...cur, featureSiblings: null, featureSiblingsLoading: false });
   }
 }
 
@@ -345,6 +382,8 @@ export async function loadCheckpoint(id: string): Promise<boolean> {
       evalError: null,
       reconstructions: null,
       checkpointComparison: null,
+      evalSiblings: null,
+      featureSiblings: null,
       traversals: null,
       sortByFactor: null,
       attentionMaps: null,

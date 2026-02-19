@@ -27,6 +27,10 @@ class EvalMetric(str, Enum):
     UFR = "ufr"
     DISENTANGLEMENT = "disentanglement"
     COMPLETENESS = "completeness"
+    WEIGHT_COSINE_SIM = "weight_cosine_sim"
+    ACTIVATION_SPARSITY = "activation_sparsity"
+    SPARSITY_VARIANCE = "sparsity_variance"
+    EFFECTIVE_RANK = "effective_rank"
 
     @property
     def higher_is_better(self) -> bool:
@@ -46,6 +50,8 @@ _HIGHER_IS_BETTER = {
     EvalMetric.UFR,
     EvalMetric.DISENTANGLEMENT,
     EvalMetric.COMPLETENESS,
+    EvalMetric.SPARSITY_VARIANCE,
+    EvalMetric.EFFECTIVE_RANK,
 }
 
 _DISPLAY_NAMES = {
@@ -58,4 +64,8 @@ _DISPLAY_NAMES = {
     EvalMetric.UFR: "UFR",
     EvalMetric.DISENTANGLEMENT: "Disentanglement",
     EvalMetric.COMPLETENESS: "Completeness",
+    EvalMetric.WEIGHT_COSINE_SIM: "Weight Cosine Sim",
+    EvalMetric.ACTIVATION_SPARSITY: "Activation Sparsity",
+    EvalMetric.SPARSITY_VARIANCE: "Sparsity Variance",
+    EvalMetric.EFFECTIVE_RANK: "Effective Rank",
 }

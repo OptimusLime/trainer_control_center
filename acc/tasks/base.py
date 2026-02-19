@@ -168,6 +168,16 @@ class Task(ABC):
         """Build and return the probe head nn.Module, or None if not needed."""
         ...
 
+    @property
+    def contributes_loss(self) -> bool:
+        """Whether this task contributes to the training loss.
+
+        True for training tasks (reconstruction, classification, etc.).
+        False for evaluation-only tasks (weight diversity, sparsity, etc.).
+        The Trainer skips eval-only tasks during the training loop.
+        """
+        return True
+
     @abstractmethod
     def compute_loss(
         self, model_output: dict[str, torch.Tensor], batch: tuple
@@ -207,3 +217,33 @@ class Task(ABC):
         if self.factor_name is not None:
             info["factor_name"] = self.factor_name
         return info
+
+
+class EvalOnlyTask(Task):
+    """Base class for evaluation-only tasks that produce no training signal.
+
+    Subclasses implement check_compatible() and evaluate() only.
+    compute_loss() is concrete and raises RuntimeError if called — the
+    Trainer must never sample eval-only tasks during training.
+
+    contributes_loss is False, so the Trainer skips these during the
+    training loop. They only run during evaluate_all().
+
+    Examples: WeightDiversityTask, ActivationSparsityTask, EffectiveRankTask.
+    """
+
+    @property
+    def contributes_loss(self) -> bool:
+        return False
+
+    def _build_head(self, latent_dim: int) -> Optional[nn.Module]:
+        return None
+
+    def compute_loss(
+        self, model_output: dict[str, torch.Tensor], batch: tuple
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            f"EvalOnlyTask '{self.name}' ({type(self).__name__}) does not "
+            f"contribute to training loss. The Trainer should never call "
+            f"compute_loss() on eval-only tasks."
+        )

@@ -76,6 +76,14 @@ class Trainer:
     def _enabled_tasks(self) -> list[Task]:
         return [t for t in self.tasks if t.enabled]
 
+    def _training_tasks(self) -> list[Task]:
+        """Enabled tasks that contribute to training loss.
+
+        Eval-only tasks (contributes_loss=False) are excluded — they only
+        run during evaluate_all().
+        """
+        return [t for t in self.tasks if t.enabled and t.contributes_loss]
+
     def train(
         self,
         steps: int,
@@ -101,11 +109,11 @@ class Trainer:
             if task.head is not None:
                 task.head.train()
 
-        enabled = self._enabled_tasks()
+        enabled = self._training_tasks()
         if not enabled:
             return []
 
-        # Build dataloaders for enabled tasks
+        # Build dataloaders for training tasks (eval-only tasks excluded)
         task_iters = {}
         task_loaders = {}
         for task in enabled:

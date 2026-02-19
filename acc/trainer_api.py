@@ -504,6 +504,226 @@ class TrainerAPI:
                     if task.head is not None:
                         task.head.to(self.device)
 
+        @app.get("/eval/siblings")
+        async def eval_siblings():
+            """Return eval metrics for all sibling checkpoints (same parent_id).
+
+            Reads stored eval_results from checkpoint metadata — no re-evaluation.
+            Returns: {
+                "siblings": [
+                    {"id": "abc", "tag": "standard-baseline", "description": "...", "eval_results": {...}},
+                    {"id": "def", "tag": "gated-cgg", "description": "...", "eval_results": {...}},
+                ],
+                "current_id": "abc"
+            }
+            """
+            if self.checkpoints is None:
+                return {"siblings": [], "current_id": None}
+
+            current_id = self.checkpoints.current_id
+            if not current_id:
+                return {"siblings": [], "current_id": None}
+
+            # Find current checkpoint's parent_id
+            all_cps = self.checkpoints.tree()
+            current_cp = None
+            for cp in all_cps:
+                if cp.id == current_id:
+                    current_cp = cp
+                    break
+
+            if current_cp is None:
+                return {"siblings": [], "current_id": current_id}
+
+            parent_id = current_cp.parent_id
+
+            # Find all siblings: checkpoints with the same parent_id
+            # (includes the current checkpoint itself)
+            siblings = []
+            for cp in all_cps:
+                if cp.parent_id == parent_id:
+                    eval_results = cp.metrics.get("eval_results", {})
+                    siblings.append({
+                        "id": cp.id,
+                        "tag": cp.tag,
+                        "description": cp.description,
+                        "eval_results": eval_results,
+                    })
+
+            return {"siblings": siblings, "current_id": current_id}
+
+        @app.get("/eval/features")
+        async def eval_features(layer_name: str = ""):
+            """Extract weight features as base64 PNG images.
+
+            For layers whose weight rows/cols match the model's image shape,
+            each row is reshaped to an image and returned as base64 PNG.
+
+            Query params:
+                layer_name: specific layer to visualize (default: auto-detect)
+
+            Returns: {
+                "layers": {
+                    "encoder.0": {
+                        "n_features": 64,
+                        "weight_shape": [64, 784],
+                        "image_shape": [28, 28],
+                        "features": ["base64...", ...]
+                    }
+                }
+            }
+            """
+            if self.autoencoder is None:
+                return JSONResponse({"error": "No model loaded"}, status_code=400)
+
+            image_shape = None
+            if hasattr(self.autoencoder, '_image_shape') and self.autoencoder._image_shape:
+                image_shape = self.autoencoder._image_shape
+            if image_shape is None:
+                return JSONResponse({"error": "Model has no image_shape"}, status_code=400)
+
+            import numpy as np
+            flat_dim = 1
+            for d in image_shape:
+                flat_dim *= d
+            spatial = image_shape[1:] if len(image_shape) == 3 else image_shape  # (H, W)
+
+            result = {}
+            for name, module in self.autoencoder.named_modules():
+                if layer_name and name != layer_name:
+                    continue
+                if not hasattr(module, 'weight'):
+                    continue
+                w = module.weight.detach().cpu()
+                # Check if weight rows match flattened image dim
+                if w.ndim == 2 and w.shape[1] == flat_dim:
+                    features = []
+                    for i in range(w.shape[0]):
+                        row = w[i].view(*spatial).float()
+                        # Normalize to [0, 1]
+                        rmin, rmax = row.min(), row.max()
+                        if rmax - rmin > 1e-8:
+                            row = (row - rmin) / (rmax - rmin)
+                        else:
+                            row = torch.zeros_like(row) + 0.5
+                        # Convert to [1, H, W] for _tensor_to_base64
+                        features.append(_tensor_to_base64(row.unsqueeze(0)))
+                    result[name] = {
+                        "n_features": w.shape[0],
+                        "weight_shape": list(w.shape),
+                        "image_shape": list(spatial),
+                        "features": features,
+                    }
+
+            return {"layers": result}
+
+        @app.get("/eval/features/siblings")
+        async def eval_features_siblings(layer_name: str = "encoder.0"):
+            """Extract weight features for all sibling checkpoints.
+
+            Temporarily loads each sibling checkpoint, extracts features,
+            restores original state. Returns features for comparison.
+
+            Returns: {
+                "siblings": [
+                    {"id": "abc", "tag": "control", "features": ["base64...", ...]},
+                    ...
+                ],
+                "current_id": "abc",
+                "n_features": 64,
+                "image_shape": [28, 28]
+            }
+            """
+            if self.autoencoder is None or self.trainer is None or self.checkpoints is None:
+                return JSONResponse({"error": "No model/trainer/checkpoints"}, status_code=400)
+
+            guard = self._training_guard()
+            if guard is not None:
+                return guard
+
+            image_shape = None
+            if hasattr(self.autoencoder, '_image_shape') and self.autoencoder._image_shape:
+                image_shape = self.autoencoder._image_shape
+            if image_shape is None:
+                return JSONResponse({"error": "Model has no image_shape"}, status_code=400)
+
+            import numpy as np
+            import copy
+            flat_dim = 1
+            for d in image_shape:
+                flat_dim *= d
+            spatial = image_shape[1:] if len(image_shape) == 3 else image_shape
+
+            current_id = self.checkpoints.current_id
+            if not current_id:
+                return {"siblings": [], "current_id": None, "n_features": 0, "image_shape": list(spatial)}
+
+            # Find siblings
+            all_cps = self.checkpoints.tree()
+            current_cp = None
+            for cp in all_cps:
+                if cp.id == current_id:
+                    current_cp = cp
+                    break
+            if current_cp is None:
+                return {"siblings": [], "current_id": current_id, "n_features": 0, "image_shape": list(spatial)}
+
+            sibling_cps = [cp for cp in all_cps if cp.parent_id == current_cp.parent_id]
+            if len(sibling_cps) < 2:
+                return {"siblings": [], "current_id": current_id, "n_features": 0, "image_shape": list(spatial)}
+
+            # Save current state
+            original_state = copy.deepcopy(self.trainer.state_dict())
+            original_cp_id = current_id
+
+            siblings = []
+            n_features = 0
+            try:
+                for cp in sibling_cps:
+                    # Load checkpoint
+                    self.checkpoints.load(cp.id, self.autoencoder, self.trainer, device=self.device)
+
+                    # Extract features from target layer
+                    named = dict(self.autoencoder.named_modules())
+                    module = named.get(layer_name)
+                    if module is None or not hasattr(module, 'weight'):
+                        continue
+                    w = module.weight.detach().cpu()
+                    if w.ndim != 2 or w.shape[1] != flat_dim:
+                        continue
+
+                    features = []
+                    for i in range(w.shape[0]):
+                        row = w[i].view(*spatial).float()
+                        rmin, rmax = row.min(), row.max()
+                        if rmax - rmin > 1e-8:
+                            row = (row - rmin) / (rmax - rmin)
+                        else:
+                            row = torch.zeros_like(row) + 0.5
+                        features.append(_tensor_to_base64(row.unsqueeze(0)))
+                    n_features = w.shape[0]
+                    siblings.append({
+                        "id": cp.id,
+                        "tag": cp.tag,
+                        "description": cp.description,
+                        "features": features,
+                    })
+            finally:
+                # Restore original state
+                self.trainer.load_state_dict(original_state)
+                self.autoencoder.to(self.device)
+                for task in self.tasks.values():
+                    if task.head is not None:
+                        task.head.to(self.device)
+                self.checkpoints._current_id = original_cp_id
+
+            return {
+                "siblings": siblings,
+                "current_id": current_id,
+                "n_features": n_features,
+                "image_shape": list(spatial),
+            }
+
         @app.post("/eval/reconstructions")
         async def eval_reconstructions(request: Request):
             """Encode + decode N images, return originals and reconstructions side-by-side."""
