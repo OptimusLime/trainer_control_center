@@ -367,27 +367,32 @@ body {
 }
 
 /* --- Reconstructions --- */
-.recon-labels {
-  display: flex;
-  gap: 4px;
-  font-size: 10px;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 6px;
-}
-.recon-labels span {
-  flex: 1;
-  text-align: center;
-}
 .recon-grid {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
+  align-items: flex-start;
+  overflow-x: auto;
 }
-.recon-pair {
+.recon-row-labels {
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.recon-row-label {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.recon-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
 }
 .recon-img {
   width: 64px;
@@ -538,6 +543,191 @@ body {
 }
 .compare-table td.compare-lower {
   color: var(--text-muted);
+}
+
+/* --- M-UI-5: Tasks --- */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.task-item {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-dim);
+}
+.task-item.task-disabled {
+  opacity: 0.5;
+}
+.task-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.task-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.task-item-type {
+  font-size: 10px;
+}
+.task-item-detail {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  align-items: center;
+}
+.task-weight-input {
+  width: 50px;
+  padding: 1px 4px;
+  background: var(--bg-button);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--font);
+  font-size: 10px;
+}
+.task-item-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+/* --- M-UI-5: Add Task / Generate Forms --- */
+.add-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* --- M-UI-5: Training Controls --- */
+.train-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.train-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.train-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 50px;
+}
+.train-input {
+  flex: 1;
+  padding: 3px 8px;
+  background: var(--bg-button);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: 11px;
+}
+.train-input:focus {
+  border-color: var(--blue);
+  outline: none;
+}
+.train-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.btn-train-start {
+  flex: 1;
+  color: #7ee787 !important;
+  border-color: #238636 !important;
+}
+.btn-train-stop {
+  color: #f85149 !important;
+  border-color: #da3633 !important;
+}
+
+/* --- M-UI-5: Device --- */
+.device-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* --- M-UI-5: Recipes List --- */
+.recipe-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.recipe-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.recipe-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.recipe-item-desc {
+  flex: 1;
+  font-size: 10px;
+}
+
+/* --- M-UI-5: Datasets --- */
+.dataset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dataset-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.dataset-item-name {
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.dataset-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+/* --- M-UI-6: Visualization Sections --- */
+.viz-section {
+  margin-bottom: 12px;
+}
+.viz-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--purple);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.viz-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.viz-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.viz-row-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  min-width: 50px;
+  padding-top: 4px;
 }
 
 /* --- Responsive --- */

@@ -11,12 +11,21 @@ export interface HealthResponse {
   device: string;
 }
 
+export interface ModelCapabilities {
+  eval: boolean;
+  reconstructions: boolean;
+  traversals: boolean;
+  sort_by_factor: boolean;
+  attention_maps: boolean;
+}
+
 export interface ModelDescribeResponse {
   description: string;
   has_decoder: boolean;
   latent_dim: number;
   num_encoder_layers: number;
   num_decoder_layers: number;
+  capabilities: ModelCapabilities;
 }
 
 export interface JobDict {
@@ -133,6 +142,65 @@ export interface CheckpointTreeResponse {
   nodes: CheckpointNode[];
   current_id: string | null;
 }
+
+// --- Tasks ---
+
+export interface TaskDescription {
+  name: string;
+  class_name: string;
+  dataset_name: string;
+  weight: number;
+  enabled: boolean;
+  latent_slice: string | null;
+  [key: string]: unknown;  // tasks may include extra fields
+}
+
+export interface RegistryTaskInfo {
+  class_name: string;
+  description: string;
+  [key: string]: unknown;
+}
+
+// --- Datasets ---
+
+export interface DatasetDescription {
+  name: string;
+  size: number;
+  image_size: number;
+  channels: number;
+  [key: string]: unknown;
+}
+
+export interface DatasetSampleResponse {
+  images: string[];  // base64 PNG
+}
+
+// --- Generators ---
+
+export interface GeneratorInfo {
+  name: string;
+  description: string;
+  [key: string]: unknown;
+}
+
+// --- Training ---
+
+export interface TrainStartParams {
+  steps?: number;
+  lr?: number;
+  probe_lr?: number;
+}
+
+// --- Eval (M-UI-6) ---
+
+/** factor_name -> array of rows, each row is array of base64 PNG */
+export type TraversalsResponse = Record<string, string[][]>;
+
+/** factor_name -> { lowest: base64[], highest: base64[] } */
+export type SortByFactorResponse = Record<string, { lowest: string[]; highest: string[] }>;
+
+/** "originals" + factor_name -> base64 PNG heatmap overlays */
+export type AttentionMapsResponse = Record<string, string[]>;
 
 // --- Eval ---
 

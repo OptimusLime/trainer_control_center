@@ -66,6 +66,7 @@ class GradientGatingL0(Recipe):
             ctx.phase = "Evaluate"
             m_standard = ctx.evaluate()
             ctx.record_results("standard", m_standard)
+            ctx.save_checkpoint("standard-baseline", description="Linear AE, no gating (control)")
             ctx.log(f"standard: {m_standard}")
 
         # ============================================================
@@ -98,6 +99,7 @@ class GradientGatingL0(Recipe):
             ctx.phase = "Evaluate"
             m_gated = ctx.evaluate()
             ctx.record_results("gated", m_gated)
+            ctx.save_checkpoint("gated-cgg", description="Linear AE, gradient gating on encoder")
             ctx.log(f"gated: {m_gated}")
 
             # Cleanup hooks

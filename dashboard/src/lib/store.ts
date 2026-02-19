@@ -22,6 +22,17 @@ import type {
   EvalCheckpointResponse,
   CheckpointTreeResponse,
   CheckpointNode,
+  TaskDescription,
+  RegistryTaskInfo,
+  DatasetDescription,
+  DatasetSampleResponse,
+  GeneratorInfo,
+  DeviceResponse,
+  RecipeInfo,
+  TrainStartParams,
+  TraversalsResponse,
+  SortByFactorResponse,
+  AttentionMapsResponse,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -49,6 +60,21 @@ export interface DashboardState {
   reconLoading: boolean;
   checkpointComparison: { current: EvalMetrics; compare: EvalCheckpointResponse } | null;
   compareLoading: boolean;
+  // M-UI-5: Tasks, datasets, training, device
+  tasks: TaskDescription[];
+  registryTasks: RegistryTaskInfo[];
+  datasets: DatasetDescription[];
+  datasetSamples: Record<string, string[]>;  // name -> base64[]
+  generators: GeneratorInfo[];
+  device: DeviceResponse | null;
+  recipes: RecipeInfo[];
+  // M-UI-6: Latent space visualizations
+  traversals: TraversalsResponse | null;
+  traversalsLoading: boolean;
+  sortByFactor: SortByFactorResponse | null;
+  sortByFactorLoading: boolean;
+  attentionMaps: AttentionMapsResponse | null;
+  attentionMapsLoading: boolean;
 }
 
 const INITIAL: DashboardState = {
@@ -70,6 +96,19 @@ const INITIAL: DashboardState = {
   reconLoading: false,
   checkpointComparison: null,
   compareLoading: false,
+  tasks: [],
+  registryTasks: [],
+  datasets: [],
+  datasetSamples: {},
+  generators: [],
+  device: null,
+  recipes: [],
+  traversals: null,
+  traversalsLoading: false,
+  sortByFactor: null,
+  sortByFactorLoading: false,
+  attentionMaps: null,
+  attentionMapsLoading: false,
 };
 
 export const $dashboard = atom<DashboardState>(INITIAL);
@@ -82,6 +121,7 @@ export const $connected = computed($dashboard, s => s.connected);
 export const $health = computed($dashboard, s => s.health);
 export const $checkpoint = computed($dashboard, s => s.checkpoint);
 export const $model = computed($dashboard, s => s.model);
+export const $capabilities = computed($dashboard, s => s.model?.capabilities ?? null);
 export const $currentJob = computed($dashboard, s => s.currentJob);
 export const $lossSummary = computed($dashboard, s => s.lossSummary);
 export const $lossHistory = computed($dashboard, s => s.lossHistory);
@@ -108,6 +148,7 @@ export const $activeJobId = computed($dashboard, s => {
 
 const POLL_MS = 5000;
 let polling = false;
+let autoPopulated = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 
 async function tick(force = false) {
@@ -118,7 +159,8 @@ async function tick(force = false) {
     const prev = $dashboard.get();
 
     // Fetch everything in parallel
-    const [health, checkpoint, model, currentJob, recipe, jobHistory, tree] = await Promise.all([
+    const [health, checkpoint, model, currentJob, recipe, jobHistory, tree,
+           tasks, registryTasks, datasets, generators, device, recipes] = await Promise.all([
       fetchJSON<HealthResponse>('/health'),
       fetchJSON<CurrentCheckpointResponse>('/checkpoints/current'),
       fetchJSON<ModelDescribeResponse>('/model/describe'),
@@ -126,6 +168,12 @@ async function tick(force = false) {
       fetchJSON<RecipeJobResponse | null>('/recipes/current'),
       fetchJSON<JobHistorySummary[]>('/jobs/history?limit=10'),
       fetchJSON<CheckpointTreeResponse>('/checkpoints/tree'),
+      fetchJSON<TaskDescription[]>('/tasks'),
+      fetchJSON<RegistryTaskInfo[]>('/registry/tasks'),
+      fetchJSON<DatasetDescription[]>('/datasets'),
+      fetchJSON<GeneratorInfo[]>('/registry/generators'),
+      fetchJSON<DeviceResponse>('/device'),
+      fetchJSON<RecipeInfo[]>('/recipes'),
     ]);
 
     const connected = health !== null;
@@ -161,7 +209,25 @@ async function tick(force = false) {
       jobHistory: jobHistory ?? prev.jobHistory,
       checkpointTree: tree?.nodes ?? prev.checkpointTree,
       checkpointCurrentId: tree?.current_id ?? prev.checkpointCurrentId,
+      tasks: tasks ?? prev.tasks,
+      registryTasks: registryTasks ?? prev.registryTasks,
+      datasets: datasets ?? prev.datasets,
+      generators: generators ?? prev.generators,
+      device: device ?? prev.device,
+      recipes: recipes ?? prev.recipes,
     });
+
+    // Auto-populate eval/recon/viz on first load — gated by model capabilities
+    const s = $dashboard.get();
+    if (s.connected && model && !currentJob && !autoPopulated) {
+      autoPopulated = true;  // only try once
+      const caps = model.capabilities;
+      if (caps?.eval) runEval();
+      if (caps?.reconstructions) runReconstructions();
+      if (caps?.traversals) fetchTraversals();
+      if (caps?.sort_by_factor) fetchSortByFactor();
+      if (caps?.attention_maps) fetchAttentionMaps();
+    }
   } finally {
     polling = false;
   }
@@ -205,6 +271,23 @@ export const $reconstructions = computed($dashboard, s => s.reconstructions);
 export const $reconLoading = computed($dashboard, s => s.reconLoading);
 export const $checkpointComparison = computed($dashboard, s => s.checkpointComparison);
 export const $compareLoading = computed($dashboard, s => s.compareLoading);
+
+// M-UI-5 slices
+export const $tasks = computed($dashboard, s => s.tasks);
+export const $registryTasks = computed($dashboard, s => s.registryTasks);
+export const $datasets = computed($dashboard, s => s.datasets);
+export const $datasetSamples = computed($dashboard, s => s.datasetSamples);
+export const $generators = computed($dashboard, s => s.generators);
+export const $device = computed($dashboard, s => s.device);
+export const $recipes = computed($dashboard, s => s.recipes);
+
+// M-UI-6 slices
+export const $traversals = computed($dashboard, s => s.traversals);
+export const $traversalsLoading = computed($dashboard, s => s.traversalsLoading);
+export const $sortByFactor = computed($dashboard, s => s.sortByFactor);
+export const $sortByFactorLoading = computed($dashboard, s => s.sortByFactorLoading);
+export const $attentionMaps = computed($dashboard, s => s.attentionMaps);
+export const $attentionMapsLoading = computed($dashboard, s => s.attentionMapsLoading);
 
 // ---------------------------------------------------------------------------
 // Eval actions (button-triggered, not polled)
@@ -271,7 +354,6 @@ export async function runCheckpointComparison(checkpointId: string) {
   const prev = $dashboard.get();
   $dashboard.set({ ...prev, compareLoading: true });
 
-  // Run eval on current model first, then eval the checkpoint
   const [currentMetrics, cpResult] = await Promise.all([
     postJSON<EvalMetrics>('/eval/run'),
     postJSON<EvalCheckpointResponse>('/eval/checkpoint', { checkpoint_id: checkpointId }),
@@ -287,4 +369,140 @@ export async function runCheckpointComparison(checkpointId: string) {
   } else {
     $dashboard.set({ ...cur, compareLoading: false });
   }
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-5: Task actions
+// ---------------------------------------------------------------------------
+
+export async function addTask(params: {
+  class_name: string; name: string; dataset_name: string; weight?: number; latent_slice?: string;
+}): Promise<boolean> {
+  const result = await postJSON<TaskDescription>('/tasks/add', params);
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function toggleTask(name: string): Promise<boolean> {
+  const result = await postJSON<{ name: string; enabled: boolean }>(`/tasks/${encodeURIComponent(name)}/toggle`);
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function setTaskWeight(name: string, weight: number): Promise<boolean> {
+  const result = await postJSON<TaskDescription>(`/tasks/${encodeURIComponent(name)}/set_weight`, { weight });
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function removeTask(name: string): Promise<boolean> {
+  const result = await postJSON<{ removed: string }>(`/tasks/${encodeURIComponent(name)}/remove`);
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-5: Dataset actions
+// ---------------------------------------------------------------------------
+
+export async function loadBuiltinDataset(name: string, imageSize: number = 64): Promise<boolean> {
+  const result = await postJSON<DatasetDescription>('/datasets/load_builtin', { name, image_size: imageSize });
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function generateDataset(generatorName: string, params: Record<string, unknown>): Promise<boolean> {
+  const result = await postJSON<DatasetDescription>('/generators/generate', { generator_name: generatorName, params });
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function fetchDatasetSamples(name: string, n: number = 8) {
+  const result = await fetchJSON<DatasetSampleResponse>(`/datasets/${encodeURIComponent(name)}/sample?n=${n}`);
+  if (result) {
+    const prev = $dashboard.get();
+    $dashboard.set({ ...prev, datasetSamples: { ...prev.datasetSamples, [name]: result.images } });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-5: Training actions
+// ---------------------------------------------------------------------------
+
+export async function startTraining(params?: TrainStartParams): Promise<boolean> {
+  const result = await postJSON<JobDict>('/train/start', params ?? {});
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function stopTraining(): Promise<boolean> {
+  const result = await postJSON<JobDict | { status: string }>('/train/stop');
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-5: Device actions
+// ---------------------------------------------------------------------------
+
+export async function setDevice(device: string): Promise<boolean> {
+  const result = await postJSON<{ previous: string; current: string }>('/device/set', { device });
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-5: Recipe actions
+// ---------------------------------------------------------------------------
+
+export async function runRecipe(name: string): Promise<boolean> {
+  const result = await postJSON<Record<string, unknown>>(`/recipes/${encodeURIComponent(name)}/run`);
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+export async function stopRecipe(): Promise<boolean> {
+  const result = await postJSON<Record<string, unknown>>('/recipes/stop');
+  if (result) { await tick(true); return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// M-UI-6: Latent space visualization actions
+// ---------------------------------------------------------------------------
+
+export async function fetchTraversals() {
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, traversalsLoading: true });
+  const result = await fetchJSON<TraversalsResponse>('/eval/traversals');
+  const cur = $dashboard.get();
+  $dashboard.set({
+    ...cur,
+    traversals: result ?? cur.traversals,
+    traversalsLoading: false,
+  });
+}
+
+export async function fetchSortByFactor() {
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, sortByFactorLoading: true });
+  const result = await fetchJSON<SortByFactorResponse>('/eval/sort_by_factor');
+  const cur = $dashboard.get();
+  $dashboard.set({
+    ...cur,
+    sortByFactor: result ?? cur.sortByFactor,
+    sortByFactorLoading: false,
+  });
+}
+
+export async function fetchAttentionMaps() {
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, attentionMapsLoading: true });
+  const result = await fetchJSON<AttentionMapsResponse>('/eval/attention_maps');
+  const cur = $dashboard.get();
+  $dashboard.set({
+    ...cur,
+    attentionMaps: result ?? cur.attentionMaps,
+    attentionMapsLoading: false,
+  });
 }

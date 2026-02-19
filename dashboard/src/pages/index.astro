@@ -62,6 +62,45 @@ import LossChart from '../components/LossChart.tsx';
         </div>
         <div class="empty">No checkpoints</div>
       </div>
+
+      <!-- M-UI-5: Tasks -->
+      <div class="panel" id="tasks-panel">
+        <h3>Tasks</h3>
+        <div class="empty">No tasks configured</div>
+      </div>
+
+      <!-- M-UI-5: Training Controls -->
+      <div class="panel" id="training-panel">
+        <h3>Training</h3>
+        <div class="train-controls">
+          <div class="train-row">
+            <label class="train-label">Steps</label>
+            <input type="number" id="train-steps" class="train-input" value="500" min="1" />
+          </div>
+          <div class="train-row">
+            <label class="train-label">LR</label>
+            <input type="number" id="train-lr" class="train-input" value="0.001" step="0.0001" min="0" />
+          </div>
+          <div class="train-buttons">
+            <button class="btn-action btn-train-start" id="btn-train-start">Start Training</button>
+            <button class="btn-action btn-train-stop" id="btn-train-stop" disabled>Stop</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- M-UI-5: Device -->
+      <div class="panel" id="device-panel">
+        <h3>Device</h3>
+        <div class="device-row">
+          <select id="device-select" class="compare-select"></select>
+        </div>
+      </div>
+
+      <!-- M-UI-5: Recipes -->
+      <div class="panel" id="recipes-panel">
+        <h3>Run Recipe</h3>
+        <div class="empty">No recipes available</div>
+      </div>
     </aside>
 
     <!-- Main Content -->
@@ -102,6 +141,86 @@ import LossChart from '../components/LossChart.tsx';
         </div>
         <div class="empty">Select a checkpoint to compare against the current model</div>
       </div>
+
+      <!-- M-UI-5: Add Task -->
+      <div class="panel" id="add-task-panel">
+        <h3>Add Task</h3>
+        <div class="add-task-form">
+          <div class="train-row">
+            <label class="train-label">Type</label>
+            <select id="task-class" class="compare-select"></select>
+          </div>
+          <div class="train-row">
+            <label class="train-label">Name</label>
+            <input type="text" id="task-name" class="train-input" placeholder="my_task" />
+          </div>
+          <div class="train-row">
+            <label class="train-label">Dataset</label>
+            <select id="task-dataset" class="compare-select"></select>
+          </div>
+          <div class="train-row">
+            <label class="train-label">Weight</label>
+            <input type="number" id="task-weight" class="train-input" value="1.0" step="0.1" min="0" />
+          </div>
+          <button class="btn-action" id="btn-add-task">Add Task</button>
+        </div>
+      </div>
+
+      <!-- M-UI-5: Datasets -->
+      <div class="panel" id="datasets-panel">
+        <div class="panel-header">
+          <h3>Datasets</h3>
+          <button class="btn-action" id="btn-load-builtin">Load Built-in</button>
+        </div>
+        <div class="empty">No datasets loaded</div>
+      </div>
+
+      <!-- M-UI-5: Generate Dataset -->
+      <div class="panel" id="generate-panel">
+        <h3>Generate Dataset</h3>
+        <div class="add-task-form">
+          <div class="train-row">
+            <label class="train-label">Generator</label>
+            <select id="gen-name" class="compare-select"></select>
+          </div>
+          <div class="train-row">
+            <label class="train-label">Count</label>
+            <input type="number" id="gen-count" class="train-input" value="1000" min="1" />
+          </div>
+          <div class="train-row">
+            <label class="train-label">Image size</label>
+            <input type="number" id="gen-size" class="train-input" value="32" min="1" />
+          </div>
+          <button class="btn-action" id="btn-generate">Generate</button>
+        </div>
+      </div>
+
+      <!-- M-UI-6: Latent Traversals -->
+      <div class="panel" id="traversals-panel">
+        <div class="panel-header">
+          <h3>Latent Traversals</h3>
+          <button class="btn-action" id="btn-traversals">Generate</button>
+        </div>
+        <div class="empty">Click "Generate" to see latent traversals per factor</div>
+      </div>
+
+      <!-- M-UI-6: Sort by Factor -->
+      <div class="panel" id="sort-panel">
+        <div class="panel-header">
+          <h3>Sort by Factor</h3>
+          <button class="btn-action" id="btn-sort">Generate</button>
+        </div>
+        <div class="empty">Click "Generate" to see images sorted by factor activation</div>
+      </div>
+
+      <!-- M-UI-6: Attention Maps -->
+      <div class="panel" id="attention-panel">
+        <div class="panel-header">
+          <h3>Attention Maps</h3>
+          <button class="btn-action" id="btn-attention">Generate</button>
+        </div>
+        <div class="empty">Click "Generate" to see attention heatmaps</div>
+      </div>
     </main>
   </div>
 </Layout>
@@ -114,8 +233,19 @@ import LossChart from '../components/LossChart.tsx';
     $reconstructions, $reconLoading,
     $checkpointComparison, $compareLoading,
     $checkpointTree, $checkpointCurrentId,
+    $tasks, $registryTasks, $datasets, $datasetSamples,
+    $generators, $device, $recipes,
+    $traversals, $traversalsLoading,
+    $sortByFactor, $sortByFactorLoading,
+    $attentionMaps, $attentionMapsLoading,
+    $capabilities,
     startPolling, loadJobLoss, runEval, runReconstructions, runCheckpointComparison,
     saveCheckpoint, loadCheckpoint, forkCheckpoint,
+    addTask, toggleTask, setTaskWeight, removeTask,
+    loadBuiltinDataset, generateDataset, fetchDatasetSamples,
+    startTraining, stopTraining, setDevice,
+    runRecipe, stopRecipe,
+    fetchTraversals, fetchSortByFactor, fetchAttentionMaps,
   } from '../lib/store';
   import { metricClass } from '../lib/theme';
   import { HEALTH_COLORS, HEALTH_FALLBACK, STATUS_COLORS, TREND_ICONS } from '../lib/theme';
@@ -372,9 +502,9 @@ import LossChart from '../components/LossChart.tsx';
 
   $reconstructions.subscribe(data => {
     if (!data) return;
-    const pairs = data.originals.map((orig, i) => {
+    const cols = data.originals.map((orig, i) => {
       const recon = data.reconstructions[i];
-      return `<div class="recon-pair">
+      return `<div class="recon-col">
         <img src="data:image/png;base64,${orig}" alt="Original" class="recon-img" />
         <img src="data:image/png;base64,${recon}" alt="Reconstruction" class="recon-img" />
       </div>`;
@@ -385,8 +515,13 @@ import LossChart from '../components/LossChart.tsx';
         <h3>Reconstructions</h3>
         <button class="btn-action" id="btn-recon">Generate</button>
       </div>
-      <div class="recon-labels"><span>Original</span><span>Reconstructed</span></div>
-      <div class="recon-grid">${pairs}</div>
+      <div class="recon-grid">
+        <div class="recon-row-labels">
+          <span class="recon-row-label">Input</span>
+          <span class="recon-row-label">Recon</span>
+        </div>
+        ${cols}
+      </div>
     `;
     document.getElementById('btn-recon')!.addEventListener('click', () => runReconstructions());
   });
@@ -616,6 +751,366 @@ import LossChart from '../components/LossChart.tsx';
     newBtn.addEventListener('click', () => {
       if (newSelect.value) runCheckpointComparison(newSelect.value);
     });
+  });
+
+  // --- M-UI-5: Tasks Panel ---
+  const tasksPanel = document.getElementById('tasks-panel')!;
+
+  $tasks.subscribe(tasks => {
+    if (!tasks || tasks.length === 0) {
+      tasksPanel.innerHTML = `<h3>Tasks</h3><div class="empty">No tasks configured</div>`;
+      return;
+    }
+    const rows = tasks.map(t => {
+      const enabledCls = t.enabled ? '' : ' task-disabled';
+      return `<div class="task-item${enabledCls}" data-task-name="${esc(t.name)}">
+        <div class="task-item-header">
+          <span class="task-item-name">${esc(t.name)}</span>
+          <span class="task-item-type text-muted">${esc(t.class_name)}</span>
+        </div>
+        <div class="task-item-detail">
+          <span>dataset: ${esc(t.dataset_name)}</span>
+          <span>weight: <input type="number" class="task-weight-input" value="${t.weight}" step="0.1" min="0" data-task-name="${esc(t.name)}" /></span>
+        </div>
+        <div class="task-item-actions">
+          <button class="btn-cp" data-action="toggle" data-task-name="${esc(t.name)}">${t.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn-cp" data-action="remove" data-task-name="${esc(t.name)}" style="color:var(--red)">Remove</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    tasksPanel.innerHTML = `<h3>Tasks</h3><div class="task-list">${rows}</div>`;
+
+    tasksPanel.querySelectorAll('button[data-action="toggle"]').forEach(btn => {
+      btn.addEventListener('click', () => toggleTask((btn as HTMLElement).dataset.taskName!));
+    });
+    tasksPanel.querySelectorAll('button[data-action="remove"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (confirm('Remove task?')) removeTask((btn as HTMLElement).dataset.taskName!);
+      });
+    });
+    tasksPanel.querySelectorAll('.task-weight-input').forEach(inp => {
+      (inp as HTMLInputElement).addEventListener('change', () => {
+        const el = inp as HTMLInputElement;
+        setTaskWeight(el.dataset.taskName!, parseFloat(el.value));
+      });
+    });
+  });
+
+  // --- M-UI-5: Add Task Form ---
+  const taskClassSelect = document.getElementById('task-class') as HTMLSelectElement;
+  const taskDatasetSelect = document.getElementById('task-dataset') as HTMLSelectElement;
+  const btnAddTask = document.getElementById('btn-add-task')!;
+
+  $registryTasks.subscribe(reg => {
+    taskClassSelect.innerHTML = reg.map(r =>
+      `<option value="${esc(r.class_name)}">${esc(r.class_name)}</option>`
+    ).join('');
+  });
+
+  $datasets.subscribe(ds => {
+    taskDatasetSelect.innerHTML = ds.map(d =>
+      `<option value="${esc(d.name)}">${esc(d.name)} (${d.size})</option>`
+    ).join('');
+  });
+
+  btnAddTask.addEventListener('click', async () => {
+    const className = taskClassSelect.value;
+    const name = (document.getElementById('task-name') as HTMLInputElement).value.trim();
+    const datasetName = taskDatasetSelect.value;
+    const weight = parseFloat((document.getElementById('task-weight') as HTMLInputElement).value);
+    if (!className || !name || !datasetName) return;
+    (btnAddTask as HTMLButtonElement).disabled = true;
+    btnAddTask.textContent = 'Adding...';
+    await addTask({ class_name: className, name, dataset_name: datasetName, weight });
+    btnAddTask.textContent = 'Add Task';
+    (btnAddTask as HTMLButtonElement).disabled = false;
+    (document.getElementById('task-name') as HTMLInputElement).value = '';
+  });
+
+  // --- M-UI-5: Training Controls ---
+  const btnTrainStart = document.getElementById('btn-train-start') as HTMLButtonElement;
+  const btnTrainStop = document.getElementById('btn-train-stop') as HTMLButtonElement;
+
+  btnTrainStart.addEventListener('click', async () => {
+    const steps = parseInt((document.getElementById('train-steps') as HTMLInputElement).value);
+    const lr = parseFloat((document.getElementById('train-lr') as HTMLInputElement).value);
+    btnTrainStart.disabled = true;
+    btnTrainStart.textContent = 'Starting...';
+    await startTraining({ steps, lr });
+    btnTrainStart.textContent = 'Start Training';
+    btnTrainStart.disabled = false;
+  });
+
+  btnTrainStop.addEventListener('click', async () => {
+    btnTrainStop.disabled = true;
+    btnTrainStop.textContent = 'Stopping...';
+    await stopTraining();
+    btnTrainStop.textContent = 'Stop';
+    btnTrainStop.disabled = false;
+  });
+
+  $currentJob.subscribe(job => {
+    // Already handles step counter above; also toggle train buttons
+    btnTrainStart.disabled = !!job;
+    btnTrainStop.disabled = !job;
+  });
+
+  // --- M-UI-5: Device ---
+  const deviceSelect = document.getElementById('device-select') as HTMLSelectElement;
+
+  $device.subscribe(dev => {
+    if (!dev) return;
+    deviceSelect.innerHTML = dev.available.map(d =>
+      `<option value="${esc(d)}"${d === dev.current ? ' selected' : ''}>${esc(d)}</option>`
+    ).join('');
+  });
+
+  deviceSelect.addEventListener('change', () => {
+    if (deviceSelect.value) setDevice(deviceSelect.value);
+  });
+
+  // --- M-UI-5: Recipes List ---
+  const recipesPanel = document.getElementById('recipes-panel')!;
+
+  $recipes.subscribe(recipes => {
+    if (!recipes || recipes.length === 0) {
+      recipesPanel.innerHTML = `<h3>Run Recipe</h3><div class="empty">No recipes available</div>`;
+      return;
+    }
+    const rows = recipes.map(r =>
+      `<div class="recipe-item">
+        <span class="recipe-item-name">${esc(r.name)}</span>
+        <span class="recipe-item-desc text-muted">${esc(r.description)}</span>
+        <button class="btn-cp btn-cp-load" data-recipe="${esc(r.name)}">Run</button>
+      </div>`
+    ).join('');
+    recipesPanel.innerHTML = `<h3>Run Recipe</h3><div class="recipe-list">${rows}</div>`;
+
+    recipesPanel.querySelectorAll('button[data-recipe]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const el = btn as HTMLElement;
+        el.textContent = 'Starting...';
+        await runRecipe(el.dataset.recipe!);
+        el.textContent = 'Run';
+      });
+    });
+  });
+
+  // --- M-UI-5: Datasets Panel ---
+  const datasetsPanel = document.getElementById('datasets-panel')!;
+  const btnLoadBuiltin = document.getElementById('btn-load-builtin')!;
+
+  btnLoadBuiltin.addEventListener('click', async () => {
+    const name = prompt('Built-in dataset name:', 'mnist');
+    if (!name) return;
+    const size = parseInt(prompt('Image size:', '64') || '64');
+    btnLoadBuiltin.textContent = 'Loading...';
+    (btnLoadBuiltin as HTMLButtonElement).disabled = true;
+    await loadBuiltinDataset(name, size);
+    btnLoadBuiltin.textContent = 'Load Built-in';
+    (btnLoadBuiltin as HTMLButtonElement).disabled = false;
+  });
+
+  $datasets.subscribe(datasets => {
+    if (!datasets || datasets.length === 0) {
+      datasetsPanel.innerHTML = `
+        <div class="panel-header"><h3>Datasets</h3>
+          <button class="btn-action" id="btn-load-builtin">Load Built-in</button>
+        </div>
+        <div class="empty">No datasets loaded</div>`;
+      document.getElementById('btn-load-builtin')?.addEventListener('click', async () => {
+        const name = prompt('Built-in dataset name:', 'mnist');
+        if (name) await loadBuiltinDataset(name, parseInt(prompt('Image size:', '64') || '64'));
+      });
+      return;
+    }
+    const rows = datasets.map(d =>
+      `<div class="dataset-item">
+        <div class="dataset-item-header">
+          <span class="dataset-item-name">${esc(d.name)}</span>
+          <span class="text-muted">${d.size} images, ${d.image_size}x${d.image_size}</span>
+          <button class="btn-cp btn-cp-load" data-ds-name="${esc(d.name)}">Samples</button>
+        </div>
+        <div class="dataset-samples" id="ds-samples-${esc(d.name)}"></div>
+      </div>`
+    ).join('');
+
+    datasetsPanel.innerHTML = `
+      <div class="panel-header"><h3>Datasets</h3>
+        <button class="btn-action" id="btn-load-builtin">Load Built-in</button>
+      </div>
+      <div class="dataset-list">${rows}</div>`;
+
+    document.getElementById('btn-load-builtin')?.addEventListener('click', async () => {
+      const name = prompt('Built-in dataset name:', 'mnist');
+      if (name) await loadBuiltinDataset(name, parseInt(prompt('Image size:', '64') || '64'));
+    });
+
+    datasetsPanel.querySelectorAll('button[data-ds-name]').forEach(btn => {
+      btn.addEventListener('click', () => fetchDatasetSamples((btn as HTMLElement).dataset.dsName!));
+    });
+  });
+
+  $datasetSamples.subscribe(samples => {
+    for (const [name, images] of Object.entries(samples)) {
+      const container = document.getElementById(`ds-samples-${name}`);
+      if (!container) continue;
+      container.innerHTML = images.map(img =>
+        `<img src="data:image/png;base64,${img}" class="recon-img" alt="sample" />`
+      ).join('');
+    }
+  });
+
+  // --- M-UI-5: Generate Dataset ---
+  const genSelect = document.getElementById('gen-name') as HTMLSelectElement;
+  const btnGenerate = document.getElementById('btn-generate')!;
+
+  $generators.subscribe(gens => {
+    genSelect.innerHTML = gens.map(g =>
+      `<option value="${esc(g.name)}">${esc(g.name)}</option>`
+    ).join('');
+  });
+
+  btnGenerate.addEventListener('click', async () => {
+    const genName = genSelect.value;
+    const n = parseInt((document.getElementById('gen-count') as HTMLInputElement).value);
+    const imageSize = parseInt((document.getElementById('gen-size') as HTMLInputElement).value);
+    if (!genName) return;
+    (btnGenerate as HTMLButtonElement).disabled = true;
+    btnGenerate.textContent = 'Generating...';
+    await generateDataset(genName, { n, image_size: imageSize });
+    btnGenerate.textContent = 'Generate';
+    (btnGenerate as HTMLButtonElement).disabled = false;
+  });
+
+  // --- Capability-gated panel visibility ---
+  $capabilities.subscribe(caps => {
+    const hide = (id: string, show: boolean) => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = show ? '' : 'none';
+    };
+    // Eval + recon panels always visible if model exists (caps != null)
+    hide('eval-panel', caps?.eval ?? true);
+    hide('recon-panel', caps?.reconstructions ?? true);
+    // M-UI-6 panels hidden unless model supports them
+    hide('traversals-panel', caps?.traversals ?? false);
+    hide('sort-panel', caps?.sort_by_factor ?? false);
+    hide('attention-panel', caps?.attention_maps ?? false);
+  });
+
+  // --- M-UI-6: Latent Traversals ---
+  const traversalsPanel = document.getElementById('traversals-panel')!;
+  const btnTraversals = document.getElementById('btn-traversals')!;
+
+  btnTraversals.addEventListener('click', () => fetchTraversals());
+
+  $traversalsLoading.subscribe(loading => {
+    btnTraversals.textContent = loading ? 'Loading...' : 'Generate';
+    (btnTraversals as HTMLButtonElement).disabled = loading;
+  });
+
+  $traversals.subscribe(data => {
+    if (!data) return;
+    const factors = Object.entries(data);
+    if (factors.length === 0) {
+      traversalsPanel.innerHTML = `
+        <div class="panel-header"><h3>Latent Traversals</h3>
+          <button class="btn-action" id="btn-traversals">Generate</button>
+        </div>
+        <div class="empty">No factor groups in model</div>`;
+      document.getElementById('btn-traversals')?.addEventListener('click', () => fetchTraversals());
+      return;
+    }
+
+    const sections = factors.map(([factorName, rows]) => {
+      const imgs = rows.flatMap(row =>
+        row.map(img => `<img src="data:image/png;base64,${img}" class="recon-img" alt="traversal" />`)
+      ).join('');
+      return `<div class="viz-section">
+        <div class="viz-section-label">${esc(factorName)}</div>
+        <div class="viz-grid">${imgs}</div>
+      </div>`;
+    }).join('');
+
+    traversalsPanel.innerHTML = `
+      <div class="panel-header"><h3>Latent Traversals</h3>
+        <button class="btn-action" id="btn-traversals">Generate</button>
+      </div>
+      ${sections}`;
+    document.getElementById('btn-traversals')?.addEventListener('click', () => fetchTraversals());
+  });
+
+  // --- M-UI-6: Sort by Factor ---
+  const sortPanel = document.getElementById('sort-panel')!;
+  const btnSort = document.getElementById('btn-sort')!;
+
+  btnSort.addEventListener('click', () => fetchSortByFactor());
+
+  $sortByFactorLoading.subscribe(loading => {
+    btnSort.textContent = loading ? 'Loading...' : 'Generate';
+    (btnSort as HTMLButtonElement).disabled = loading;
+  });
+
+  $sortByFactor.subscribe(data => {
+    if (!data) return;
+    const factors = Object.entries(data);
+    if (factors.length === 0) return;
+
+    const sections = factors.map(([factorName, { lowest, highest }]) => {
+      const lowImgs = lowest.map(img =>
+        `<img src="data:image/png;base64,${img}" class="recon-img" alt="low" />`
+      ).join('');
+      const highImgs = highest.map(img =>
+        `<img src="data:image/png;base64,${img}" class="recon-img" alt="high" />`
+      ).join('');
+      return `<div class="viz-section">
+        <div class="viz-section-label">${esc(factorName)}</div>
+        <div class="viz-row"><span class="viz-row-label">Lowest</span><div class="viz-grid">${lowImgs}</div></div>
+        <div class="viz-row"><span class="viz-row-label">Highest</span><div class="viz-grid">${highImgs}</div></div>
+      </div>`;
+    }).join('');
+
+    sortPanel.innerHTML = `
+      <div class="panel-header"><h3>Sort by Factor</h3>
+        <button class="btn-action" id="btn-sort">Generate</button>
+      </div>
+      ${sections}`;
+    document.getElementById('btn-sort')?.addEventListener('click', () => fetchSortByFactor());
+  });
+
+  // --- M-UI-6: Attention Maps ---
+  const attentionPanel = document.getElementById('attention-panel')!;
+  const btnAttention = document.getElementById('btn-attention')!;
+
+  btnAttention.addEventListener('click', () => fetchAttentionMaps());
+
+  $attentionMapsLoading.subscribe(loading => {
+    btnAttention.textContent = loading ? 'Loading...' : 'Generate';
+    (btnAttention as HTMLButtonElement).disabled = loading;
+  });
+
+  $attentionMaps.subscribe(data => {
+    if (!data) return;
+    const entries = Object.entries(data);
+    if (entries.length === 0) return;
+
+    const sections = entries.map(([key, images]) => {
+      const imgs = images.map(img =>
+        `<img src="data:image/png;base64,${img}" class="recon-img" alt="${esc(key)}" />`
+      ).join('');
+      return `<div class="viz-section">
+        <div class="viz-section-label">${esc(key)}</div>
+        <div class="viz-grid">${imgs}</div>
+      </div>`;
+    }).join('');
+
+    attentionPanel.innerHTML = `
+      <div class="panel-header"><h3>Attention Maps</h3>
+        <button class="btn-action" id="btn-attention">Generate</button>
+      </div>
+      ${sections}`;
+    document.getElementById('btn-attention')?.addEventListener('click', () => fetchAttentionMaps());
   });
 
   // --- Start ---

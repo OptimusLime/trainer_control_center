@@ -137,6 +137,13 @@ class TrainerAPI:
                 "latent_dim": model.latent_dim,
                 "num_encoder_layers": num_enc,
                 "num_decoder_layers": num_dec,
+                "capabilities": {
+                    "eval": True,
+                    "reconstructions": model.has_decoder,
+                    "traversals": hasattr(model, "factor_groups") and model.has_decoder,
+                    "sort_by_factor": hasattr(model, "factor_groups"),
+                    "attention_maps": hasattr(model, "cross_attn_stages"),
+                },
             }
 
         @app.post("/model/create")
@@ -535,12 +542,11 @@ class TrainerAPI:
 
         @app.post("/checkpoints/save")
         async def save_checkpoint(request: Request):
-            if (
-                self.autoencoder is None
-                or self.trainer is None
-                or self.checkpoints is None
-            ):
-                return JSONResponse({"error": "No model/trainer/checkpoint store"}, status_code=400)
+            if self.autoencoder is None or self.trainer is None:
+                return JSONResponse({"error": "No model/trainer loaded"}, status_code=400)
+            if self.checkpoints is None:
+                from acc.checkpoints import CheckpointStore
+                self.checkpoints = CheckpointStore("./acc/checkpoints_data")
             data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
             # Build metrics BEFORE save so they're persisted in the .pt file
