@@ -128,3 +128,24 @@ export interface JobHistorySummary {
   final_losses: Record<string, FinalLossEntry>;
   overall_health: 'healthy' | 'warning' | 'critical' | 'unknown';
 }
+
+export interface CheckpointTreeResponse {
+  nodes: CheckpointNode[];
+  current_id: string | null;
+}
+
+// --- Eval ---
+
+/** task_name -> { metric_name: value } */
+export type EvalMetrics = Record<string, Record<string, number>>;
+
+export interface EvalReconstructionsResponse {
+  originals: string[];       // raw base64 PNG
+  reconstructions: string[]; // raw base64 PNG
+}
+
+export interface EvalCheckpointResponse {
+  checkpoint_id: string;
+  tag: string;
+  metrics: EvalMetrics;
+}

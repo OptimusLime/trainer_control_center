@@ -50,6 +50,18 @@ import LossChart from '../components/LossChart.tsx';
         <h3>Job History</h3>
         <div class="empty">No jobs</div>
       </div>
+
+      <div class="panel" id="checkpoint-tree-panel">
+        <div class="panel-header">
+          <h3>Checkpoints</h3>
+          <button class="btn-action" id="btn-save-toggle">Save</button>
+        </div>
+        <div id="save-form" class="save-form" style="display:none;">
+          <input type="text" id="save-tag" class="save-input" placeholder="checkpoint tag..." />
+          <button class="btn-action btn-save" id="btn-save">Save Checkpoint</button>
+        </div>
+        <div class="empty">No checkpoints</div>
+      </div>
     </aside>
 
     <!-- Main Content -->
@@ -57,6 +69,38 @@ import LossChart from '../components/LossChart.tsx';
       <div class="panel">
         <h3>Loss Curves</h3>
         <LossChart client:load />
+      </div>
+
+      <!-- Eval -->
+      <div class="panel" id="eval-panel">
+        <div class="panel-header">
+          <h3>Eval Metrics</h3>
+          <button class="btn-action" id="btn-eval">Run Eval</button>
+        </div>
+        <div class="empty">Click "Run Eval" to evaluate the current model</div>
+      </div>
+
+      <!-- Reconstructions -->
+      <div class="panel" id="recon-panel">
+        <div class="panel-header">
+          <h3>Reconstructions</h3>
+          <button class="btn-action" id="btn-recon">Generate</button>
+        </div>
+        <div class="empty">Click "Generate" to see input vs reconstruction</div>
+      </div>
+
+      <!-- Checkpoint Comparison -->
+      <div class="panel" id="compare-panel">
+        <div class="panel-header">
+          <h3>Checkpoint Comparison</h3>
+          <div class="compare-controls">
+            <select id="compare-select" class="compare-select">
+              <option value="">Select checkpoint...</option>
+            </select>
+            <button class="btn-action" id="btn-compare" disabled>Compare</button>
+          </div>
+        </div>
+        <div class="empty">Select a checkpoint to compare against the current model</div>
       </div>
     </main>
   </div>
@@ -66,8 +110,14 @@ import LossChart from '../components/LossChart.tsx';
   import {
     $dashboard, $checkpoint, $model, $currentJob,
     $lossSummary, $recipe, $jobHistory,
-    startPolling, loadJobLoss,
+    $evalResults, $evalLoading, $evalError,
+    $reconstructions, $reconLoading,
+    $checkpointComparison, $compareLoading,
+    $checkpointTree, $checkpointCurrentId,
+    startPolling, loadJobLoss, runEval, runReconstructions, runCheckpointComparison,
+    saveCheckpoint, loadCheckpoint, forkCheckpoint,
   } from '../lib/store';
+  import { metricClass } from '../lib/theme';
   import { HEALTH_COLORS, HEALTH_FALLBACK, STATUS_COLORS, TREND_ICONS } from '../lib/theme';
 
   // --- DOM refs ---
@@ -258,6 +308,313 @@ import LossChart from '../components/LossChart.tsx';
     });
     document.getElementById('btn-live')?.addEventListener('click', () => {
       selectedJobId = null;
+    });
+  });
+
+  // --- Eval Metrics ---
+  const evalPanel = document.getElementById('eval-panel')!;
+  const btnEval = document.getElementById('btn-eval')!;
+
+  btnEval.addEventListener('click', () => runEval());
+
+  $evalLoading.subscribe(loading => {
+    btnEval.textContent = loading ? 'Running...' : 'Run Eval';
+    (btnEval as HTMLButtonElement).disabled = loading;
+  });
+
+  $evalResults.subscribe(data => {
+    if (!data) return;
+    const tasks = Object.entries(data);
+    if (tasks.length === 0) return;
+
+    const rows = tasks.flatMap(([taskName, metrics]) =>
+      Object.entries(metrics).map(([metricName, value]) => {
+        const cls = metricClass(metricName, value);
+        return `<tr>
+          <td>${esc(taskName)}</td>
+          <td>${esc(metricName)}</td>
+          <td class="${cls ? 'metric-' + cls : ''}">${value.toFixed(4)}</td>
+        </tr>`;
+      })
+    ).join('');
+
+    evalPanel.innerHTML = `
+      <div class="panel-header">
+        <h3>Eval Metrics</h3>
+        <button class="btn-action" id="btn-eval">Run Eval</button>
+      </div>
+      <table class="loss-summary-table">
+        <thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+    // Re-attach button handler
+    document.getElementById('btn-eval')!.addEventListener('click', () => runEval());
+  });
+
+  $evalError.subscribe(err => {
+    if (!err) return;
+    const existing = evalPanel.querySelector('.eval-error');
+    if (existing) existing.remove();
+    evalPanel.insertAdjacentHTML('beforeend', `<div class="eval-error recipe-error">${esc(err)}</div>`);
+  });
+
+  // --- Reconstructions ---
+  const reconPanel = document.getElementById('recon-panel')!;
+  const btnRecon = document.getElementById('btn-recon')!;
+
+  btnRecon.addEventListener('click', () => runReconstructions());
+
+  $reconLoading.subscribe(loading => {
+    btnRecon.textContent = loading ? 'Generating...' : 'Generate';
+    (btnRecon as HTMLButtonElement).disabled = loading;
+  });
+
+  $reconstructions.subscribe(data => {
+    if (!data) return;
+    const pairs = data.originals.map((orig, i) => {
+      const recon = data.reconstructions[i];
+      return `<div class="recon-pair">
+        <img src="data:image/png;base64,${orig}" alt="Original" class="recon-img" />
+        <img src="data:image/png;base64,${recon}" alt="Reconstruction" class="recon-img" />
+      </div>`;
+    }).join('');
+
+    reconPanel.innerHTML = `
+      <div class="panel-header">
+        <h3>Reconstructions</h3>
+        <button class="btn-action" id="btn-recon">Generate</button>
+      </div>
+      <div class="recon-labels"><span>Original</span><span>Reconstructed</span></div>
+      <div class="recon-grid">${pairs}</div>
+    `;
+    document.getElementById('btn-recon')!.addEventListener('click', () => runReconstructions());
+  });
+
+  // --- Checkpoint Tree ---
+  const treePanel = document.getElementById('checkpoint-tree-panel')!;
+  const saveForm = document.getElementById('save-form')!;
+  const saveTagInput = document.getElementById('save-tag') as HTMLInputElement;
+  const btnSaveToggle = document.getElementById('btn-save-toggle')!;
+  const btnSave = document.getElementById('btn-save')!;
+
+  btnSaveToggle.addEventListener('click', () => {
+    saveForm.style.display = saveForm.style.display === 'none' ? 'flex' : 'none';
+    if (saveForm.style.display !== 'none') saveTagInput.focus();
+  });
+
+  btnSave.addEventListener('click', async () => {
+    const tag = saveTagInput.value.trim() || 'checkpoint';
+    (btnSave as HTMLButtonElement).disabled = true;
+    btnSave.textContent = 'Saving...';
+    await saveCheckpoint(tag);
+    saveTagInput.value = '';
+    saveForm.style.display = 'none';
+    btnSave.textContent = 'Save Checkpoint';
+    (btnSave as HTMLButtonElement).disabled = false;
+  });
+
+  saveTagInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') btnSave.click();
+  });
+
+  /** Build tree nodes with indentation based on parent_id. */
+  function renderTree(nodes: typeof $checkpointTree.value, currentId: string | null): string {
+    if (nodes.length === 0) return '<div class="empty">No checkpoints</div>';
+
+    // Build parent->children map
+    const childMap = new Map<string | null, typeof nodes>();
+    for (const n of nodes) {
+      const pid = n.parent_id;
+      if (!childMap.has(pid)) childMap.set(pid, []);
+      childMap.get(pid)!.push(n);
+    }
+
+    const html: string[] = [];
+
+    function walk(parentId: string | null, depth: number) {
+      const children = childMap.get(parentId) ?? [];
+      // Sort by timestamp descending (newest first)
+      children.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      for (const node of children) {
+        const isCurrent = node.id === currentId;
+        const date = new Date(node.timestamp).toLocaleDateString();
+        const step = node.step.toLocaleString();
+        html.push(`
+          <div class="cp-node${isCurrent ? ' cp-current' : ''}" style="padding-left: ${depth * 16 + 8}px" data-cp-id="${node.id}">
+            <div class="cp-node-header">
+              <span class="cp-tag">${esc(node.tag)}</span>
+              ${isCurrent ? '<span class="cp-badge">current</span>' : ''}
+            </div>
+            <div class="cp-node-detail">
+              step ${step} &middot; ${date} &middot; ${node.id.slice(0, 8)}
+            </div>
+            <div class="cp-node-actions">
+              ${!isCurrent ? `<button class="btn-cp btn-cp-load" data-action="load" data-cp-id="${node.id}">Load</button>` : ''}
+              <button class="btn-cp btn-cp-fork" data-action="fork" data-cp-id="${node.id}" data-cp-tag="${esc(node.tag)}">Fork</button>
+            </div>
+          </div>
+        `);
+        walk(node.id, depth + 1);
+      }
+    }
+
+    walk(null, 0);
+    // Also render orphan roots (nodes whose parent isn't in the tree)
+    const allIds = new Set(nodes.map(n => n.id));
+    for (const n of nodes) {
+      if (n.parent_id && !allIds.has(n.parent_id) && !childMap.get(null)?.includes(n)) {
+        // This node's parent doesn't exist, treat as root
+        if (!html.some(h => h.includes(`data-cp-id="${n.id}"`))) {
+          walk(n.id, 0);
+        }
+      }
+    }
+
+    return html.join('');
+  }
+
+  $checkpointTree.subscribe(nodes => {
+    const currentId = $checkpointCurrentId.get();
+    const treeHtml = renderTree(nodes, currentId);
+
+    // Preserve save form and header, only replace tree content
+    const existingTree = treePanel.querySelector('.cp-tree');
+    const emptyEl = treePanel.querySelector('.empty');
+    if (existingTree) {
+      existingTree.innerHTML = treeHtml;
+    } else if (emptyEl && nodes.length > 0) {
+      emptyEl.remove();
+      const treeDiv = document.createElement('div');
+      treeDiv.className = 'cp-tree';
+      treeDiv.innerHTML = treeHtml;
+      treePanel.appendChild(treeDiv);
+    }
+
+    // Attach action handlers via delegation
+    treePanel.querySelectorAll('.btn-cp').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const el = btn as HTMLElement;
+        const action = el.dataset.action;
+        const cpId = el.dataset.cpId!;
+        if (action === 'load') {
+          el.textContent = 'Loading...';
+          await loadCheckpoint(cpId);
+        } else if (action === 'fork') {
+          const newTag = prompt('Fork tag:', el.dataset.cpTag + '-fork');
+          if (newTag) {
+            el.textContent = 'Forking...';
+            await forkCheckpoint(cpId, newTag);
+          }
+        }
+      });
+    });
+  });
+
+  // Also update compare dropdown from store tree data
+  $checkpointTree.subscribe(nodes => {
+    const currentId = $checkpointCurrentId.get();
+    const opts = nodes
+      .filter(n => n.id !== currentId)
+      .map(n => `<option value="${n.id}">${esc(n.tag)} (${n.id.slice(0, 8)})</option>`)
+      .join('');
+    const selects = document.querySelectorAll('#compare-select');
+    selects.forEach(sel => {
+      (sel as HTMLSelectElement).innerHTML = `<option value="">Select checkpoint...</option>${opts}`;
+    });
+  });
+
+  // --- Checkpoint Comparison ---
+  const comparePanel = document.getElementById('compare-panel')!;
+  const compareSelect = document.getElementById('compare-select') as HTMLSelectElement;
+  const btnCompare = document.getElementById('btn-compare') as HTMLButtonElement;
+
+  compareSelect.addEventListener('change', () => {
+    btnCompare.disabled = !compareSelect.value;
+  });
+
+  btnCompare.addEventListener('click', () => {
+    if (compareSelect.value) runCheckpointComparison(compareSelect.value);
+  });
+
+  $compareLoading.subscribe(loading => {
+    btnCompare.textContent = loading ? 'Comparing...' : 'Compare';
+    btnCompare.disabled = loading || !compareSelect.value;
+  });
+
+  $checkpointComparison.subscribe(data => {
+    if (!data) return;
+    const { current, compare } = data;
+
+    // Collect all unique task+metric combos
+    const allTasks = new Set([...Object.keys(current), ...Object.keys(compare.metrics)]);
+    const rows: string[] = [];
+
+    for (const task of allTasks) {
+      const curMetrics = current[task] ?? {};
+      const cmpMetrics = compare.metrics[task] ?? {};
+      const allMetricNames = new Set([...Object.keys(curMetrics), ...Object.keys(cmpMetrics)]);
+
+      for (const metric of allMetricNames) {
+        const curVal = curMetrics[metric];
+        const cmpVal = cmpMetrics[metric];
+        const curStr = curVal !== undefined ? curVal.toFixed(4) : '-';
+        const cmpStr = cmpVal !== undefined ? cmpVal.toFixed(4) : '-';
+
+        // Determine which is better
+        let curCls = '', cmpCls = '';
+        if (curVal !== undefined && cmpVal !== undefined) {
+          const cls = metricClass(metric, curVal);
+          const clsCmp = metricClass(metric, cmpVal);
+          // Highlight the better one
+          if (cls === 'good' && clsCmp !== 'good') curCls = 'compare-better';
+          else if (clsCmp === 'good' && cls !== 'good') cmpCls = 'compare-better';
+          else if (curVal !== cmpVal) {
+            // For metrics without thresholds, just show difference
+            const diff = curVal - cmpVal;
+            curCls = diff > 0 ? 'compare-higher' : 'compare-lower';
+            cmpCls = diff > 0 ? 'compare-lower' : 'compare-higher';
+          }
+        }
+
+        rows.push(`<tr>
+          <td>${esc(task)}</td>
+          <td>${esc(metric)}</td>
+          <td class="${curCls}">${curStr}</td>
+          <td class="${cmpCls}">${cmpStr}</td>
+        </tr>`);
+      }
+    }
+
+    comparePanel.innerHTML = `
+      <div class="panel-header">
+        <h3>Checkpoint Comparison</h3>
+        <div class="compare-controls">
+          <select id="compare-select" class="compare-select">
+            ${compareSelect.innerHTML}
+          </select>
+          <button class="btn-action" id="btn-compare">Compare</button>
+        </div>
+      </div>
+      <div class="compare-header">
+        <span class="compare-label">Current</span>
+        <span class="compare-vs">vs</span>
+        <span class="compare-label">${esc(compare.tag)} (${compare.checkpoint_id.slice(0, 8)})</span>
+      </div>
+      <table class="loss-summary-table compare-table">
+        <thead><tr><th>Task</th><th>Metric</th><th>Current</th><th>${esc(compare.tag)}</th></tr></thead>
+        <tbody>${rows.join('')}</tbody>
+      </table>
+    `;
+    // Re-attach handlers after innerHTML replacement
+    const newSelect = document.getElementById('compare-select') as HTMLSelectElement;
+    const newBtn = document.getElementById('btn-compare') as HTMLButtonElement;
+    newSelect.addEventListener('change', () => {
+      newBtn.disabled = !newSelect.value;
+    });
+    newBtn.addEventListener('click', () => {
+      if (newSelect.value) runCheckpointComparison(newSelect.value);
     });
   });
 
