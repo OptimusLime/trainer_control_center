@@ -335,7 +335,21 @@ export async function saveCheckpoint(tag: string): Promise<boolean> {
 export async function loadCheckpoint(id: string): Promise<boolean> {
   const result = await postJSON<CheckpointNode>('/checkpoints/load', { id });
   if (result) {
-    await tick(true); // refresh everything — model changed
+    // Model changed — wipe all eval/recon/viz state so we don't show stale data
+    const prev = $dashboard.get();
+    $dashboard.set({
+      ...prev,
+      evalResults: null,
+      evalError: null,
+      reconstructions: null,
+      checkpointComparison: null,
+      traversals: null,
+      sortByFactor: null,
+      attentionMaps: null,
+    });
+    // Re-fetch polled state
+    autoPopulated = false;  // allow auto-populate to fire again for new model
+    await tick(true);
     return true;
   }
   return false;
