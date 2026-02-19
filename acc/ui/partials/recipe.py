@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api
+from acc.ui.api import call as _api, is_error, keep_existing
 
 
 def _phase_html(phase: str, state: str, is_current: bool) -> str:
@@ -178,6 +178,9 @@ async def partial_recipe(request: Request):
     recipes = await _api("/recipes")
     current = await _api("/recipes/current")
 
+    if is_error(recipes):
+        return keep_existing()
+
     running = (
         current
         and isinstance(current, dict)
@@ -242,7 +245,7 @@ async def partial_recipe(request: Request):
             hx-swap="innerHTML">Run Recipe</button>
         """
 
-    poll_attr = 'hx-get="/partial/recipe" hx-trigger="every 2s" hx-target="#recipe-panel" hx-swap="innerHTML"' if running else ''
+    poll_attr = 'hx-get="/partial/recipe" hx-trigger="every 10s" hx-target="#recipe-panel" hx-swap="innerHTML"' if running else ''
 
     return HTMLResponse(f"""
     <div class="panel" {poll_attr}>

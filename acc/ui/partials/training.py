@@ -3,7 +3,7 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api, is_error
+from acc.ui.api import call as _api, is_error, keep_existing
 from acc.ui import components as C
 
 
@@ -42,7 +42,10 @@ async def partial_training(request: Request):
     # JS: initialize chart and load data — wrapped in requestAnimationFrame
     # to guarantee the canvas is in the DOM and laid out before Chart.js touches it
     if running and recent_job_id:
-        init_js = f"requestAnimationFrame(function() {{ initChart(); loadLossHistory('{recent_job_id}'); setTimeout(function() {{ startSSE('{recent_job_id}'); }}, 300); }});"
+        # SSE DISABLED — was causing trainer to hang. The SSE stream + training
+        # thread both fight over jobs._lock on every step, creating a lock convoy
+        # that starves the event loop. Poll loss history instead.
+        init_js = f"requestAnimationFrame(function() {{ initChart(); loadLossHistory('{recent_job_id}'); }});"
     elif recent_job_id:
         init_js = f"requestAnimationFrame(function() {{ initChart(); loadLossHistory('{recent_job_id}'); }});"
     else:
@@ -63,7 +66,7 @@ async def partial_training(request: Request):
                         htmx.ajax('GET', '/partial/training', {target: '#training-panel', swap: 'innerHTML'});
                     }
                 }).catch(function() {});
-            }, 2000);
+            }, 10000);
         })();
         """
     else:
@@ -88,9 +91,13 @@ async def partial_training(request: Request):
 
 async def partial_step(request: Request):
     job = await _api("/jobs/current")
+    if is_error(job):
+        return keep_existing()
     if job and isinstance(job, dict) and "current_step" in job:
         return HTMLResponse(f"[step: {job['current_step']}]")
     jobs = await _api("/jobs")
+    if is_error(jobs):
+        return keep_existing()
     if jobs and isinstance(jobs, list) and len(jobs) > 0:
         return HTMLResponse(f"[step: {jobs[0].get('current_step', '-')}]")
     return HTMLResponse("[step: -]")
@@ -99,6 +106,8 @@ async def partial_step(request: Request):
 async def partial_jobs_history(request: Request):
     """Job history panel — recent jobs with summary, click to load loss curves."""
     history = await _api("/jobs/history?limit=10")
+    if is_error(history):
+        return keep_existing()
     if not history or isinstance(history, dict):
         return HTMLResponse(
             '<div class="panel"><h3>Job History</h3><div class="empty">No jobs yet</div></div>'

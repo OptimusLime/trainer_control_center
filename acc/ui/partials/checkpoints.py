@@ -3,13 +3,15 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api, is_error
+from acc.ui.api import call as _api, is_error, keep_existing
 from acc.ui import components as C
 
 
 async def partial_checkpoint_indicator(request: Request):
     """Header badge showing current checkpoint tag + short ID."""
     tree = await _api("/checkpoints/tree")
+    if is_error(tree):
+        return keep_existing()
     if not tree or not isinstance(tree, dict):
         return HTMLResponse('<span style="color:#484f58;">[no checkpoint]</span>')
     current_id = tree.get("current_id")
@@ -111,7 +113,9 @@ async def partial_checkpoints_tree(request: Request):
     for each checkpoint. Groups branches under their root nodes.
     """
     tree = await _api("/checkpoints/tree")
-    if not tree or is_error(tree):
+    if is_error(tree):
+        return keep_existing()
+    if not tree:
         return HTMLResponse(
             '<div class="panel"><h3>Checkpoint Tree</h3><div class="empty">No checkpoints</div></div>'
         )

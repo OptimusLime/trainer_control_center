@@ -166,10 +166,13 @@ class Trainer:
             if on_step is not None:
                 on_step(step_info)
 
-            # Yield the GIL briefly so the FastAPI event loop can process
-            # pending HTTP requests (health checks, SSE, etc.).
-            if step % 5 == 0:
-                time.sleep(0)
+            # Yield the GIL so the asyncio event loop (same process, different
+            # thread via uvicorn) can serve HTTP requests. For small models
+            # (linear AE) each step is sub-millisecond GPU time, making the
+            # training loop essentially CPU-bound Python. Without aggressive
+            # yielding, the event loop starves completely.
+            # sleep(0.001) every step = 25s overhead on 25k steps — acceptable.
+            time.sleep(0.001)
 
         return loss_history
 

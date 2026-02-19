@@ -3,13 +3,15 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api, is_error
+from acc.ui.api import call as _api, is_error, keep_existing
 
 
 async def partial_datasets(request: Request):
     """Dataset browser with sample thumbnails."""
     datasets = await _api("/datasets")
-    if not datasets or is_error(datasets):
+    if is_error(datasets):
+        return keep_existing()
+    if not datasets:
         return HTMLResponse(
             '<div class="panel"><h3>Datasets</h3><div class="empty">No datasets</div></div>'
         )
@@ -55,6 +57,8 @@ async def partial_dataset_samples(request: Request):
 async def partial_generate(request: Request):
     """[+ Dataset] panel — pick generator, configure params, generate."""
     generators = await _api("/registry/generators")
+    if is_error(generators):
+        return keep_existing()
 
     if not generators or isinstance(generators, dict):
         return HTMLResponse(

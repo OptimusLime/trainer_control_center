@@ -3,14 +3,14 @@
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-from acc.ui.api import call as _api, is_error
+from acc.ui.api import call as _api, is_error, keep_existing
 from acc.ui import components as C
 
 
 async def partial_model(request: Request):
     data = await _api("/model/describe")
     if is_error(data):
-        return HTMLResponse(C.no_model_guard("Model"))
+        return keep_existing()
 
     return HTMLResponse(f"""
     <div class="panel">
@@ -26,7 +26,9 @@ async def partial_model(request: Request):
 async def partial_tasks(request: Request):
     """Enhanced task cards with weight adjustment and remove button."""
     tasks = await _api("/tasks")
-    if not tasks or is_error(tasks):
+    if is_error(tasks):
+        return keep_existing()
+    if not tasks:
         return HTMLResponse(
             '<div class="panel"><h3>Tasks</h3><div class="empty">No tasks attached</div></div>'
         )

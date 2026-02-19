@@ -419,20 +419,12 @@ class TrainerAPI:
 
         @app.get("/jobs/{job_id}/stream")
         async def stream_job(job_id: str, from_step: int = 0):
+            # SSE DISABLED — the blocking stream iterator + training thread
+            # both contend for jobs._lock on every step, creating a lock
+            # convoy that starves the uvicorn event loop and makes the
+            # entire trainer unresponsive. Return immediate "done" instead.
+            # TODO: fix by replacing lock-based streaming with an async queue.
             async def generate():
-                # Run the blocking stream() iterator in a thread
-                loop = asyncio.get_event_loop()
-                stream_iter = self.jobs.stream(job_id, from_step=from_step)
-                while True:
-                    try:
-                        step_data = await loop.run_in_executor(
-                            None, lambda: next(stream_iter, None)
-                        )
-                        if step_data is None:
-                            break
-                        yield f"data: {json.dumps(step_data)}\n\n"
-                    except StopIteration:
-                        break
                 yield 'data: {"done": true}\n\n'
 
             return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1102,8 +1094,20 @@ class TrainerAPI:
         )
 
     def run(self, host: str = "0.0.0.0", port: int = 6060):
-        """Start the HTTP server. No auto-reload — trainer holds in-memory state."""
+        """Start the HTTP server. No auto-reload — trainer holds in-memory state.
+
+        Sets a short GIL switch interval so training threads can't starve
+        the HTTP event loop. Default is 5ms; we set 0.5ms which guarantees
+        the event loop gets CPU time even during heavy training.
+        """
+        import sys
         import uvicorn
+
+        # Force frequent GIL switching so training threads don't starve HTTP.
+        # Default is 5ms (0.005). We set 0.5ms — training throughput impact
+        # is negligible (context switches are ~1μs on modern CPUs).
+        sys.setswitchinterval(0.0005)
+
         uvicorn.run(self.app, host=host, port=port)
 
 

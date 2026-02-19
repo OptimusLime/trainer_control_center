@@ -65,9 +65,9 @@ def _page(title: str, body: str) -> str:
     <div class="header">
         <h1>ACC -- Autoencoder Control Center</h1>
         <div style="display:flex;align-items:center;gap:12px;">
-            <span id="checkpoint-indicator" hx-get="/partial/checkpoint_indicator" hx-trigger="load, every 3s, checkpoint-changed from:body" style="font-weight:600;"></span>
-            <span id="trainer-status" hx-get="/partial/health" hx-trigger="load, every 3s"></span>
-            <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 2s">[step: -]</span>
+            <span id="checkpoint-indicator" hx-get="/partial/checkpoint_indicator" hx-trigger="load, every 15s, checkpoint-changed from:body" style="font-weight:600;"></span>
+            <span id="trainer-status" hx-get="/partial/health" hx-trigger="load, every 10s"></span>
+            <span class="step" id="step-counter" hx-get="/partial/step" hx-trigger="every 5s">[step: -]</span>
         </div>
     </div>
     <div class="layout">
@@ -88,19 +88,19 @@ def _sidebar_placeholder() -> str:
         <div id="recipe-panel" hx-get="/partial/recipe" hx-trigger="load">
             <div class="panel"><h3>Recipes</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 5s, checkpoint-changed from:body, model-changed from:body">
+        <div id="model-panel" hx-get="/partial/model" hx-trigger="load, every 30s, checkpoint-changed from:body, model-changed from:body">
             <div class="panel"><h3>Model</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="tasks-panel" hx-get="/partial/tasks" hx-trigger="load, every 3s, checkpoint-changed from:body, tasks-changed from:body">
+        <div id="tasks-panel" hx-get="/partial/tasks" hx-trigger="load, every 15s, checkpoint-changed from:body, tasks-changed from:body">
             <div class="panel"><h3>Tasks</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="add-task-panel" hx-get="/partial/add_task" hx-trigger="load, every 5s, tasks-changed from:body, datasets-changed from:body">
+        <div id="add-task-panel" hx-get="/partial/add_task" hx-trigger="load, every 30s, tasks-changed from:body, datasets-changed from:body">
             <div class="panel"><h3>+ Task</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="generate-panel" hx-get="/partial/generate" hx-trigger="load, every 5s, datasets-changed from:body">
+        <div id="generate-panel" hx-get="/partial/generate" hx-trigger="load, every 30s, datasets-changed from:body">
             <div class="panel"><h3>+ Dataset</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 5s, checkpoint-changed from:body">
+        <div id="checkpoints-panel" hx-get="/partial/checkpoints" hx-trigger="load, every 15s, checkpoint-changed from:body">
             <div class="panel"><h3>Checkpoint Tree</h3><div class="empty">Loading...</div></div>
         </div>
     """
@@ -111,13 +111,13 @@ def _main_placeholder() -> str:
         <div id="training-panel" hx-get="/partial/training" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Training</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 10s, checkpoint-changed from:body, training-done from:body">
+        <div id="recon-panel" hx-get="/partial/reconstructions" hx-trigger="load, every 30s, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Reconstructions</h3><div class="empty">Loading...</div></div>
         </div>
         <div id="eval-panel" hx-get="/partial/eval" hx-trigger="load, checkpoint-changed from:body, training-done from:body, tasks-changed from:body">
             <div class="panel"><h3>Eval Metrics</h3><div class="empty">Loading...</div></div>
         </div>
-        <div id="jobs-panel" hx-get="/partial/jobs_history" hx-trigger="load, every 5s, training-done from:body">
+        <div id="jobs-panel" hx-get="/partial/jobs_history" hx-trigger="load, every 15s, training-done from:body">
             <div class="panel"><h3>Job History</h3><div class="empty">Loading...</div></div>
         </div>
         <div id="traversal-panel" hx-get="/partial/traversals" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
@@ -129,7 +129,7 @@ def _main_placeholder() -> str:
         <div id="attention-panel" hx-get="/partial/attention_maps" hx-trigger="load, checkpoint-changed from:body, training-done from:body">
             <div class="panel"><h3>Attention Maps</h3><div class="empty">Run eval to generate</div></div>
         </div>
-        <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 10s, datasets-changed from:body">
+        <div id="datasets-panel" hx-get="/partial/datasets" hx-trigger="load, every 30s, datasets-changed from:body">
             <div class="panel"><h3>Datasets</h3><div class="empty">Loading...</div></div>
         </div>
     """
