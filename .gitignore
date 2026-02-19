@@ -39,6 +39,11 @@ test_checkpoints*/
 # Jupyter
 .ipynb_checkpoints/
 
+# Node / Dashboard
+node_modules/
+dashboard/dist/
+dashboard/.astro/
+
 # Misc
 *.log
 *.bak

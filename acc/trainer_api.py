@@ -11,8 +11,12 @@ import json
 import threading
 from typing import Optional
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 import torch
 
@@ -39,6 +43,15 @@ class TrainerAPI:
 
     def __init__(self):
         self.app = FastAPI(title="ACC Trainer")
+
+        # CORS — allow the Astro dev server (port 4321) and any origin for dev.
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
         self.autoencoder: Optional[Autoencoder] = None
         self.trainer: Optional[Trainer] = None
         self.jobs = JobManager()
@@ -1099,9 +1112,22 @@ class TrainerAPI:
         Sets a short GIL switch interval so training threads can't starve
         the HTTP event loop. Default is 5ms; we set 0.5ms which guarantees
         the event loop gets CPU time even during heavy training.
+
+        If the Astro dashboard has been built (dashboard/dist/ exists), it's
+        mounted at / so the trainer serves its own UI. In dev mode the Astro
+        dev server runs separately and proxies API calls here.
         """
         import sys
         import uvicorn
+
+        # Serve the built Astro dashboard at / if available.
+        # Must be mounted AFTER all API routes so they take priority.
+        dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+        if dashboard_dist.is_dir():
+            self.app.mount("/", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard")
+            print(f"  Dashboard: serving from {dashboard_dist}")
+        else:
+            print(f"  Dashboard: not built (run 'npm run build' in dashboard/)")
 
         # Force frequent GIL switching so training threads don't starve HTTP.
         # Default is 5ms (0.005). We set 0.5ms — training throughput impact

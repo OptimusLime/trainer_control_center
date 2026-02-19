@@ -1,36 +1,41 @@
 #!/usr/bin/env bash
-# Start the ACC dashboard UI process.
+# Start the ACC Dashboard (Astro dev server).
 #
 # Usage:
-#   ./run_ui.sh                        # local trainer (http://localhost:6060)
-#   ./run_ui.sh --remote paul-cheddar  # remote trainer via hostname
-#   ./run_ui.sh --trainer-url http://100.121.59.123:6060  # explicit URL
-#   ./run_ui.sh --port 9090            # custom UI port
+#   ./run_ui.sh              # dev server on port 4321, proxies API to localhost:6060
+#   ./run_ui.sh build        # build for production (trainer serves static files)
 #
-# The UI binds to 0.0.0.0, so it's accessible from the browser on
-# any machine on the same network.
+# Dev mode: Astro dev server on http://0.0.0.0:4321 with hot reload.
+# API requests are proxied to the trainer on localhost:6060.
+#
+# Production: run './run_ui.sh build', then the trainer serves the dashboard
+# directly at http://localhost:6060/.
 
 set -e
 
-# Parse --remote flag and convert to --trainer-url
-ARGS=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --remote)
-            REMOTE_HOST="$2"
-            ARGS+=("--trainer-url" "http://${REMOTE_HOST}:6060")
-            shift 2
-            ;;
-        *)
-            ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
+DASHBOARD_DIR="$(dirname "$0")/dashboard"
 
-echo "========================================"
-echo "  ACC Dashboard UI"
-echo "========================================"
-echo ""
+# Ensure dependencies are installed
+if [ ! -d "$DASHBOARD_DIR/node_modules" ]; then
+    echo "Installing dashboard dependencies..."
+    npm install --prefix "$DASHBOARD_DIR"
+fi
 
-python -m acc.ui_main "${ARGS[@]}"
+if [ "$1" = "build" ]; then
+    echo "========================================"
+    echo "  ACC Dashboard — Production Build"
+    echo "========================================"
+    echo ""
+    npm run build --prefix "$DASHBOARD_DIR"
+    echo ""
+    echo "Build complete. Restart the trainer to serve the dashboard."
+else
+    echo "========================================"
+    echo "  ACC Dashboard — Dev Server"
+    echo "========================================"
+    echo ""
+    echo "  Dashboard: http://localhost:4321"
+    echo "  Trainer:   http://localhost:6060 (API proxy)"
+    echo ""
+    npm run dev --prefix "$DASHBOARD_DIR"
+fi

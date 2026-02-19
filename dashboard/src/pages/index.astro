@@ -1,0 +1,209 @@
+---
+import Layout from '../layouts/Layout.astro';
+import LossChart from '../components/LossChart.tsx';
+---
+
+<Layout title="ACC Dashboard">
+  <div class="dashboard">
+    <!-- Header -->
+    <header class="header">
+      <h1>ACC Dashboard</h1>
+      <div class="status-group">
+        <div id="health-badge" class="health-badge">
+          <span class="health-dot" style="background: #8b949e;"></span>
+          <span class="health-text">Connecting...</span>
+        </div>
+        <div id="device-badge" class="text-muted">--</div>
+      </div>
+      <div class="live-stats">
+        <div id="step-counter" class="live-stat">
+          <span class="live-stat-value step-value">--</span>
+          <span class="live-stat-label">steps</span>
+        </div>
+        <div id="live-loss" class="live-stat">
+          <span class="live-stat-value loss-value">--</span>
+          <span class="live-stat-label">loss</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <!-- Model Info -->
+      <div class="panel" id="model-info-panel">
+        <h3>Model</h3>
+        <div class="empty">No model loaded</div>
+      </div>
+
+      <!-- Loss Summary -->
+      <div class="panel" id="loss-summary-panel">
+        <h3>Loss Summary</h3>
+        <div class="empty">No training data</div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- Loss Chart -->
+      <div class="panel">
+        <h3>Loss Curves</h3>
+        <LossChart client:load />
+      </div>
+    </main>
+  </div>
+</Layout>
+
+<script>
+  import { fetchJSON } from '../lib/api';
+  import { createPoller } from '../lib/polling';
+  import { HEALTH_COLORS, HEALTH_FALLBACK, TREND_ICONS } from '../lib/theme';
+  import type { HealthResponse, ModelDescribeResponse, JobDict, LossSummaryResponse } from '../lib/types';
+
+  // --- Health Badge ---
+  const healthBadge = document.getElementById('health-badge')!;
+  const healthDot = healthBadge.querySelector('.health-dot') as HTMLElement;
+  const healthText = healthBadge.querySelector('.health-text') as HTMLElement;
+  const deviceBadge = document.getElementById('device-badge')!;
+
+  let connected = false;
+
+  createPoller<HealthResponse>(
+    () => fetchJSON('/health'),
+    (data) => {
+      connected = true;
+      healthDot.style.background = HEALTH_COLORS['healthy'] || HEALTH_FALLBACK;
+      healthText.textContent = `${data.num_tasks} tasks, ${data.num_datasets} datasets`;
+      deviceBadge.textContent = data.device;
+    },
+    10000,
+  ).start();
+
+  // Detect disconnection: if health fetch fails, poller won't call updater.
+  // We need a separate interval to detect staleness.
+  setInterval(async () => {
+    const data = await fetchJSON<HealthResponse>('/health');
+    if (!data) {
+      if (connected) {
+        connected = false;
+        healthDot.style.background = '#f85149';
+        healthText.textContent = 'Disconnected';
+        deviceBadge.textContent = '--';
+      }
+    }
+  }, 10000);
+
+  // --- Live Stats (Step + Loss) ---
+  const stepValue = document.querySelector('.step-value') as HTMLElement;
+  const lossValue = document.querySelector('.loss-value') as HTMLElement;
+
+  createPoller<JobDict | null>(
+    () => fetchJSON('/jobs/current'),
+    (data) => {
+      if (data) {
+        stepValue.textContent = data.current_step.toLocaleString();
+        // Also fetch latest loss
+        fetchJSON<LossSummaryResponse>(`/jobs/${data.id}/loss_summary`).then((summary) => {
+          if (!summary) return;
+          const entries = Object.values(summary);
+          if (entries.length === 0) return;
+          // Show total final loss (sum of all tasks) or single task loss
+          if (entries.length === 1) {
+            lossValue.textContent = entries[0].final.toFixed(4);
+            lossValue.style.color = entries[0].health === 'healthy' ? '#7ee787' : entries[0].health === 'warning' ? '#f0883e' : '#f85149';
+          } else {
+            const total = entries.reduce((s, e) => s + e.final, 0);
+            lossValue.textContent = total.toFixed(4);
+          }
+        });
+      } else {
+        stepValue.textContent = 'Idle';
+        lossValue.textContent = '--';
+        lossValue.style.color = '';
+      }
+    },
+    5000,
+  ).start();
+
+  // --- Model Info ---
+  const modelInfoPanel = document.getElementById('model-info-panel')!;
+
+  createPoller<ModelDescribeResponse>(
+    () => fetchJSON('/model/describe'),
+    (data) => {
+      modelInfoPanel.innerHTML = `
+        <h3>Model</h3>
+        <div class="model-info-grid">
+          <span class="label">Description</span>
+          <span class="value">${escapeHtml(data.description)}</span>
+          <span class="label">Latent dim</span>
+          <span class="value">${data.latent_dim}</span>
+          <span class="label">Encoder layers</span>
+          <span class="value">${data.num_encoder_layers}</span>
+          <span class="label">Decoder layers</span>
+          <span class="value">${data.num_decoder_layers}</span>
+          <span class="label">Has decoder</span>
+          <span class="value">${data.has_decoder ? 'Yes' : 'No'}</span>
+        </div>
+      `;
+    },
+    15000,
+  ).start();
+
+  // --- Loss Summary ---
+  const lossSummaryPanel = document.getElementById('loss-summary-panel')!;
+
+  createPoller<LossSummaryResponse>(
+    async () => {
+      // First check if there's a current job
+      const job = await fetchJSON<JobDict | null>('/jobs/current');
+      if (!job) return null;
+      return fetchJSON(`/jobs/${job.id}/loss_summary`);
+    },
+    (data) => {
+      const entries = Object.values(data);
+      if (entries.length === 0) {
+        lossSummaryPanel.innerHTML = `<h3>Loss Summary</h3><div class="empty">No training data</div>`;
+        return;
+      }
+      const rows = entries.map((e) => {
+        const healthColor = HEALTH_COLORS[e.health] || HEALTH_FALLBACK;
+        const trend = TREND_ICONS[e.trend] || TREND_ICONS['flat'];
+        return `
+          <tr>
+            <td>${escapeHtml(e.task_name)}</td>
+            <td style="color: ${healthColor}">${e.final.toFixed(4)}</td>
+            <td>${e.mean.toFixed(4)}</td>
+            <td>${e.min.toFixed(4)}</td>
+            <td class="trend-${e.trend}">
+              ${trend.icon} ${e.trend}
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      lossSummaryPanel.innerHTML = `
+        <h3>Loss Summary</h3>
+        <table class="loss-summary-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Final</th>
+              <th>Mean</th>
+              <th>Min</th>
+              <th>Trend</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    },
+    5000,
+  ).start();
+
+  // --- Utility ---
+  function escapeHtml(str: string): string {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+</script>

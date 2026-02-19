@@ -1,0 +1,208 @@
+/* ACC Dashboard — Dark GitHub theme */
+
+/* --- Reset & Base --- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-page:    #0d1117;
+  --bg-panel:   #161b22;
+  --bg-button:  #21262d;
+  --bg-hover:   #1c2333;
+  --border:     #30363d;
+  --border-dim: #21262d;
+
+  --text:       #c9d1d9;
+  --text-bright:#f0f6fc;
+  --text-muted: #8b949e;
+  --text-dim:   #484f58;
+
+  --blue:       #58a6ff;
+  --purple:     #d2a8ff;
+  --green:      #238636;
+  --green-bright:#2ea043;
+  --red:        #da3633;
+  --red-bright: #f85149;
+
+  --radius:     6px;
+  --radius-sm:  4px;
+  --font:       'SF Mono', 'Menlo', 'Consolas', monospace;
+}
+
+html { font-size: 13px; }
+body {
+  font-family: var(--font);
+  background: var(--bg-page);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* --- Layout --- */
+.dashboard {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+  padding: 12px;
+  max-width: 1600px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+.header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  gap: 16px;
+}
+
+.header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.header .status-group {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- Panels --- */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.panel h3 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--blue);
+  margin-bottom: 8px;
+}
+
+.panel .empty {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* --- Health Badge --- */
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* --- Model Info --- */
+.model-info-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.model-info-grid .label { color: var(--text-muted); }
+.model-info-grid .value { color: var(--text-bright); }
+
+/* --- Live Stats (header bar) --- */
+.live-stats {
+  display: flex;
+  gap: 24px;
+  align-items: baseline;
+}
+.live-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.live-stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+.live-stat-label {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* --- Loss Summary --- */
+.loss-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.loss-summary-table th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--border-dim);
+}
+.loss-summary-table td {
+  padding: 6px 10px 6px 0;
+  font-variant-numeric: tabular-nums;
+}
+.loss-summary-table .metric-good { color: #7ee787; }
+.loss-summary-table .metric-mid  { color: #f0883e; }
+.loss-summary-table .metric-bad  { color: #f85149; }
+
+.trend-improving { color: #7ee787; }
+.trend-worsening { color: #f85149; }
+.trend-flat      { color: #8b949e; }
+
+/* --- Chart container --- */
+.chart-container {
+  position: relative;
+  height: 280px;
+  width: 100%;
+}
+
+/* --- Responsive --- */
+@media (max-width: 768px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+  .header {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+}
+
+/* --- Utility --- */
+.text-muted { color: var(--text-muted); }
+.text-bright { color: var(--text-bright); }
+.text-dim { color: var(--text-dim); }
