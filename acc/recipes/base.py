@@ -163,7 +163,7 @@ class RecipeContext:
             from acc.checkpoints import CheckpointStore
             self._api.checkpoints = CheckpointStore("./acc/checkpoints_data")
 
-        # Build metrics (loss summary) BEFORE save so it's in the .pt file
+        # Build metrics (loss summary + full history) BEFORE save so it's in the .pt file
         metrics = {}
         from acc.loss_health import compute_loss_summary
         recent_jobs = self._api.jobs.list()
@@ -173,6 +173,7 @@ class RecipeContext:
                 metrics["loss_summary"] = {
                     name: s.to_dict() for name, s in summaries.items()
                 }
+                metrics["loss_history"] = j.losses
                 break
 
         cp = self._api.checkpoints.save(

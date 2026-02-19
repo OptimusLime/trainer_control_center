@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import threading
+from datetime import datetime
 from typing import Optional
 
 from pathlib import Path
@@ -549,7 +550,7 @@ class TrainerAPI:
                 self.checkpoints = CheckpointStore("./acc/checkpoints_data")
             data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
-            # Build metrics BEFORE save so they're persisted in the .pt file
+            # Build metrics (summary + full history) BEFORE save
             metrics = {}
             recent_jobs = self.jobs.list()
             for j in recent_jobs:
@@ -558,6 +559,7 @@ class TrainerAPI:
                     metrics["loss_summary"] = {
                         name: s.to_dict() for name, s in summaries.items()
                     }
+                    metrics["loss_history"] = j.losses
                     break
             cp = self.checkpoints.save(
                 self.autoencoder, self.trainer, tag=tag,
@@ -583,7 +585,27 @@ class TrainerAPI:
                 return JSONResponse({"error": "Missing checkpoint id"}, status_code=400)
             try:
                 cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer, device=self.device)
-                return cp.to_dict()
+                cp_dict = cp.to_dict()
+                # Inject checkpoint's stored loss history as a synthetic job
+                # so the dashboard can show loss curves for this checkpoint
+                loss_history = cp_dict.get("metrics", {}).get("loss_history")
+                if loss_history:
+                    from acc.jobs import JobInfo
+                    syn_id = f"cp-{cp_id[:8]}"
+                    job = JobInfo(
+                        id=syn_id,
+                        state="completed",
+                        total_steps=max((e.get("step", 0) for e in loss_history), default=0),
+                        current_step=max((e.get("step", 0) for e in loss_history), default=0),
+                        task_names=list({e["task_name"] for e in loss_history}),
+                        losses=loss_history,
+                        started_at=datetime.fromisoformat(cp_dict["timestamp"]),
+                        completed_at=datetime.fromisoformat(cp_dict["timestamp"]),
+                        checkpoint_id=cp_id,
+                    )
+                    with self.jobs._lock:
+                        self.jobs._jobs[syn_id] = job
+                return cp_dict
             except FileNotFoundError as e:
                 return JSONResponse({"error": str(e)}, status_code=404)
 
@@ -732,8 +754,9 @@ class TrainerAPI:
                         break
 
             # Find the most relevant job for this checkpoint:
-            # 1. Job that started from this checkpoint (checkpoint_id matches)
-            # 2. Fallback: most recent job
+            # 1. Job whose checkpoint_id matches (started FROM this checkpoint)
+            # 2. Job completed closest before the checkpoint was saved
+            # 3. Fallback: most recent job with losses
             relevant_job_id = None
             all_jobs = self.jobs.list()
             if cp_id:
@@ -741,6 +764,22 @@ class TrainerAPI:
                     if j.checkpoint_id == cp_id:
                         relevant_job_id = j.id
                         break
+
+            if not relevant_job_id and cp_data and all_jobs:
+                # Match by timestamp: checkpoint saved right after job completes
+                cp_time = datetime.fromisoformat(cp_data["timestamp"])
+                best_job = None
+                best_delta = None
+                for j in all_jobs:
+                    if j.completed_at and j.losses:
+                        delta = (cp_time - j.completed_at).total_seconds()
+                        if 0 <= delta < 10:  # checkpoint within 10s of job completion
+                            if best_delta is None or delta < best_delta:
+                                best_delta = delta
+                                best_job = j
+                if best_job:
+                    relevant_job_id = best_job.id
+
             # Fallback: most recent job with losses
             if not relevant_job_id and all_jobs:
                 for j in all_jobs:

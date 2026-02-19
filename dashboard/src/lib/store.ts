@@ -335,10 +335,12 @@ export async function saveCheckpoint(tag: string): Promise<boolean> {
 export async function loadCheckpoint(id: string): Promise<boolean> {
   const result = await postJSON<CheckpointNode>('/checkpoints/load', { id });
   if (result) {
-    // Model changed — wipe all eval/recon/viz state so we don't show stale data
+    // Model changed — wipe ALL model-dependent state
     const prev = $dashboard.get();
     $dashboard.set({
       ...prev,
+      lossSummary: null,
+      lossHistory: [],
       evalResults: null,
       evalError: null,
       reconstructions: null,
