@@ -634,10 +634,151 @@ Total: ~34 lines replacing ~35 lines. Net diff is near zero.
 - Effective rank > 25 (H-M3.1-5)
 - Signal scatter: dead features have high SOM signal (bottom-right), not stuck at origin
 
+### M3-0.1 Results
+
+**Run date:** 2026-02-20. Same 4 conditions.
+
+| Metric | M3-0 slow | M3-0.1 slow | M3-0 med | M3-0.1 med |
+|--------|-----------|-------------|----------|------------|
+| L1 | 0.087 | **0.079** | 0.098 | 0.096 |
+| weight_cosine_sim | 0.218 | **0.939** | 0.330 | **0.980** |
+| effective_rank | 15.1 | **22.6** | 19.4 | 9.0 |
+| unreachable | 48 | **0** | 36 | **0** |
+| dead (<1% wr) | 59 | **5** | 59 | **0** |
+| winners (>5% wr) | 4 | **58** | 5 | **61** |
+| dead cos sim | 0.206 | 0.964 | 0.393 | 0.991 |
+
+**Verdict: Unreachable SOLVED, new convergence-to-average problem.**
+
+- **Unreachable: 48→0 and 36→0.** Global attraction eliminates unreachable completely.
+- **Dead: 59→5 and 59→0.** bcl-med has ZERO dead features.
+- **Winners: 4→58 and 5→61.** Most features now active.
+- **BUT cosine similarity: 0.218→0.939.** All features pointing same direction. The global attraction pulls everything toward the same average input. Features are "alive" but identical.
+- **Root cause:** `attraction_weight = (1 - win_rate)` decays linearly. A feature at win_rate=0.1 still gets 90% attraction weight. The global force overwhelms all local differentiation.
+
+→ Fixed in M3-0.2 by replacing uniform novelty with feature-level and local-level novelty signals.
+
 ### M3-0.1 Cleanup Audit
-- [ ] `grad_mask` now includes `gradient_weight` (= win_rate). This means even batch-level winners get attenuated gradient if their overall win_rate is low. Is this desired? Yes — a feature that occasionally wins but mostly loses should get mild gradient, not full. The smooth blending handles this correctly.
-- [ ] `rotation_weight` peaks at win_rate=0.5. Are there enough features at this level to benefit? In M3-0, most features were either dead (wr<0.01) or winning (wr>0.1). If most features are dead, rotation force is near-zero for them (correct — dead features need attraction, not rotation). The rotation force matters for the transition zone.
-- [ ] Force 2 attract_target uses raw `layer_input`, not bully-adjusted. This is intentional — dead features don't have meaningful bully directions (they lose to everyone), so projecting out bullies would remove most of the signal.
+- [x] Global attraction solves unreachable. Confirmed: 0 unreachable in both conditions.
+- [x] `rotation_weight` at wr=0.5 — moot, features jump straight from dead to ~85% win rate. No contender zone.
+- [x] Problem identified: attraction force too strong, causes convergence-to-average even for active features.
+
+---
+
+### M3-0.2: Feature Novelty + Local Novelty BCL
+
+**Functionality:** BCL modulates ALL forces by how UNIQUE each feature is, not just by whether it wins. Redundant winners (58 features all claiming the same images) get crushed gradient. Dead features get pulled toward globally underserved images. Contenders get pulled toward locally novel images within their neighborhood — the edge cases their dominant neighbor doesn't cover.
+
+**Why this fixes convergence-to-average:** In M3-0.1, 58 features all had ~85% win rate and all got strong gradient + mild global attraction. They were "alive" but identical. The problem: win_rate alone can't distinguish a unique specialist from a redundant generalist. M3-0.2 adds `feature_novelty` — if you win images that nobody else wins, you're novel and get strong gradient. If you win images everybody wins, you're redundant and your gradient is crushed.
+
+**Key new concepts:**
+
+1. **`image_coverage[B]`** — replaces old `image_crowding`. Same computation (`rank_score.sum(dim=1)`), renamed for clarity. High = many features claim this image.
+
+2. **`feature_novelty[D]`** — for each feature, of the images you win, how unique are they? `sum(rank_score / image_coverage) / sum(rank_score)`. High = you occupy unique territory. The 58 identical features all get LOW feature_novelty because they claim the same crowded images.
+
+3. **`local_coverage[B, D]`** — for each (image, feature), how many of THIS FEATURE'S neighbors also won this image? Computed by gathering `rank_score` at neighbor indices and summing.
+
+4. **`local_novelty[B, D]`** — `1 / (local_coverage + 1)`. High when your neighbors DON'T cover this image. These are your unique local opportunities.
+
+**Three forces (renumbered):**
+
+- **Force 1 (gradient):** `rank_score * feature_novelty * gradient_weight`. Only unique winners get strong gradient. Redundant winners get crushed.
+- **Force 2 (local novelty pull):** `rank_score * local_novelty * (1-feature_novelty) * in_nbr * contender_weight`. Pull toward images that are locally novel — the edge cases your dominant neighbor misses. LOCAL force, needs neighborhood.
+- **Force 3 (global attraction):** `(1-rank_score) * (1/image_coverage) * attraction_weight`. Pull toward globally underserved images. GLOBAL force, no neighborhood gate.
+
+**Blending weights:**
+```
+gradient_weight = win_rate * feature_novelty       — unique winners
+contender_weight = win_rate * (1 - feature_novelty) — redundant winners
+attraction_weight = (1 - win_rate)                   — losers
+```
+
+**The Algorithm:**
+
+```
+STEP 4: IMAGE COVERAGE
+  image_coverage[image] = sum of rank_score across features  # [B]
+
+STEP 5: FEATURE NOVELTY
+  feature_novelty[feature] = 
+    sum(rank_score[:, f] / image_coverage) / (sum(rank_score[:, f]) + eps)
+  # [D] — high = unique territory, low = redundant
+
+STEP 6: LOCAL NOVELTY
+  local_coverage[image, feature] = sum of rank_score[image, nbr_j] for j in neighbors[feature]
+  local_novelty[image, feature] = 1 / (local_coverage + 1)  # [B, D]
+
+STEP 7: BLENDING WEIGHTS
+  gradient_weight = win_rate * feature_novelty
+  contender_weight = win_rate * (1 - feature_novelty)
+  attraction_weight = 1 - win_rate
+
+STEP 8: FORCE 1 — GRADIENT
+  grad_mask = rank_score * feature_novelty * gradient_weight  # [B, D]
+
+STEP 9: FORCE 2 — LOCAL NOVELTY PULL (for contenders)
+  local_pull = rank_score * local_novelty * (1 - feature_novelty) * in_nbr * contender_weight
+  local_pull = normalize per feature
+  local_target = local_pull.T @ layer_input  # [D, in_features]
+
+STEP 10: FORCE 3 — GLOBAL ATTRACTION (for dead features)
+  global_pull = (1 - rank_score) * (1 / image_coverage) * attraction_weight
+  global_pull = normalize per feature
+  global_target = global_pull.T @ layer_input  # [D, in_features]
+
+STEP 11: COMBINE + BACKWARD HOOK
+  total_som = (cw * local_target + aw * global_target) / (cw + aw + eps)
+  backward_hook: weight += som_lr * (total_som - weight); return grad * grad_mask
+```
+
+**What changes in the code:**
+
+`acc/gradient_gating.py`, `BCL._forward_hook` — replace lines 721-803 (image_novelty through metrics storage):
+
+1. `image_coverage` replaces `image_crowding` / `novelty` (2 lines)
+2. `feature_novelty` — new (~3 lines)
+3. `local_coverage` + `local_novelty` — gather rank_score at neighbor indices (~4 lines)
+4. Blending weights (3 lines)
+5. `in_nbr` computation (same 4 lines)
+6. Force 1: grad_mask with feature_novelty (2 lines)
+7. Force 2: local novelty pull, LOCAL with in_nbr (6 lines)
+8. Force 3: global attraction with 1/image_coverage (6 lines)
+9. Combine (3 lines)
+10. Metrics storage (same, minus bully_magnitude)
+
+Total: ~40 lines replacing ~80 lines. **Net reduction of ~40 lines.** Bully projection, rotated_input [B,D,784] tensor, beat_margin/beat_weights all removed. Simpler AND cheaper.
+
+**What stays the same:**
+- `BCLConfig` — no new parameters
+- `BCLHealthTracker` — same metrics. `som_weight` still computed for scatter plot.
+- `get_step_metrics()` — `bully_magnitude` removed (no more bully computation). All other fields same.
+- Recipe — same 4 conditions
+- API, dashboard — unchanged
+- Backward hook — identical structure
+
+**Memory:** CHEAPER than M3-0/M3-0.1. No [B, D, 784] tensor. `local_coverage` is [B, D] = 32 KB. `local_novelty` is [B, D] = 32 KB. Total extra ~64 KB vs 25 MB saved.
+
+**Hypotheses:**
+- **H-M3.2-1:** Feature novelty crushes redundant winners' gradient. Cosine similarity < 0.3.
+- **H-M3.2-2:** Local novelty pull creates sub-specialists. Winners diversify into niche experts.
+- **H-M3.2-3:** Unreachable stays at 0 (global attraction preserved).
+- **H-M3.2-4:** Effective rank > 30.
+- **H-M3.2-5:** L1 < 0.070.
+
+**Verification:**
+- Run recipe with same 4 conditions
+- Cosine similarity < 0.3 (H-M3.2-1)
+- Unreachable = 0 (H-M3.2-3)
+- Effective rank > 30 (H-M3.2-4)
+- L1 < 0.070 (H-M3.2-5)
+- Weight visualization: distinct templates, not 58 copies of the same blob
+
+### M3-0.2 Cleanup Audit
+- [ ] `feature_novelty` divides by `image_coverage` which could be near-zero for rare images. The eps in rank_score.sum prevents true zero but monitor for numerical instability.
+- [ ] `local_coverage` gather requires `rank_score` indexed at neighbor positions. This is the same gather pattern as `neighbor_strengths` from Step 3 — can reuse `neighbors_exp`.
+- [ ] With bully projection removed, `bully_magnitude` metric is gone from `get_step_metrics()`. `BCLHealthTracker.record_bcl_step()` should tolerate missing keys gracefully (it already does — just reads what's in the dict).
+- [ ] `feature_novelty` is computed per-batch. Noisy for small batches. At B=128 this should be stable enough.
 
 ---
 
@@ -687,7 +828,9 @@ M-CGG-2.9: Bidirectional Competitive Learning (BCL) — local SOM signal for los
     ↓
 M3-0: Bully-Adjusted SOM Targets ✅ (directional: eff_rank 1.8→15, cos_sim 0.51→0.22, but 59 dead)
     ↓
-M3-0.1: Three-Force BCL (global attraction + local rotation + gradient)
+M3-0.1: Three-Force BCL ✅ (unreachable→0, dead→5, but cos_sim 0.94 — convergence-to-average)
+    ↓
+M3-0.2: Feature Novelty + Local Novelty BCL
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -821,7 +964,9 @@ M-CGG-2.9: Bidirectional Competitive Learning (local SOM for losers) ✅ (FAILED
     ↓
 M3-0: Bully-Adjusted SOM Targets ✅ (directional improvement, blob breaking)
     ↓
-M3-0.1: Three-Force BCL (global attraction + local rotation + gradient)
+M3-0.1: Three-Force BCL ✅ (unreachable→0, convergence-to-average)
+    ↓
+M3-0.2: Feature Novelty + Local Novelty BCL
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -847,7 +992,8 @@ M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes m
 | M-CGG-2.75: Residual PCA Replacement | **DONE** | Run PCA replacement for dead features, see replacement events + success rate |
 | M-CGG-2.9: Bidirectional Competitive Learning | **DONE (FAILED)** | BCL v1 causes blob translation (H3). Dead features collapse to cos_sim 0.77. Effective rank 1.8-6.1. |
 | M3-0: Bully-Adjusted SOM Targets | **DONE** | Blob breaking: eff_rank 1.8→15.1, cos_sim 0.51→0.22. Still 59 dead, 36-48 unreachable. |
-| M3-0.1: Three-Force BCL | Not started | Global attraction + local rotation + gradient. Fix unreachable via global SOM for dead features. |
+| M3-0.1: Three-Force BCL | **DONE** | Unreachable→0, dead→5, winners→58. But cos_sim 0.94 (convergence-to-average). |
+| M3-0.2: Feature Novelty + Local Novelty BCL | Not started | Crush redundant winners' gradient via feature_novelty. Local niche-finding via local_novelty. |
 | M-CGG-2.5c: Enriched Eval Metrics | Not started | See Hoyer sparsity, top-k, selectivity, feature utilization heatmap |
 | M-CGG-3: Conv AE + Depth Gating | Not started | Run gating on conv layers with depth-dependent strength |
 | M-CGG-4: Conv VAE + KL | Not started | Test gating compatibility with VAE objective |
