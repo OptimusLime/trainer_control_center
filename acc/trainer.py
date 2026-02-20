@@ -89,6 +89,7 @@ class Trainer:
         steps: int,
         on_step: Optional[Callable[[dict], None]] = None,
         task_weights: Optional[dict[str, float]] = None,
+        training_metrics_fn: Optional[Callable[[int], Optional[dict]]] = None,
     ) -> list[dict]:
         """Train for the given number of steps with weighted task sampling.
 
@@ -99,6 +100,10 @@ class Trainer:
                 Tasks not listed get weight 1.0.  Weights are relative —
                 {"recon": 9, "kl": 1} means recon is sampled 90% of the time.
                 If None, all tasks have equal weight (uniform sampling).
+            training_metrics_fn: Optional callable(step) -> dict or None.
+                Called after each backward pass. If it returns a dict, that
+                dict is attached to step_info as "training_metrics". Used by
+                gradient gating to inject assignment entropy, gradient CV, etc.
 
         Returns:
             List of per-step loss dicts.
@@ -155,6 +160,11 @@ class Trainer:
 
             loss.backward()
 
+            # Collect training-time metrics (e.g., gating entropy) after backward
+            training_metrics = None
+            if training_metrics_fn is not None:
+                training_metrics = training_metrics_fn(step)
+
             self.model_optimizer.step()
             if self.probe_optimizer is not None:
                 self.probe_optimizer.step()
@@ -169,6 +179,8 @@ class Trainer:
                 "task_loss": loss_val,
                 "health": classify_loss(task_type, loss_val).value,
             }
+            if training_metrics is not None:
+                step_info["training_metrics"] = training_metrics
             loss_history.append(step_info)
 
             if on_step is not None:

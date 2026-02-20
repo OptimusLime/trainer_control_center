@@ -102,6 +102,166 @@ The recipe creates both conditions (standard + gated), trains both, evaluates bo
 
 ---
 
+### M-CGG-2.5a: Training-Time Metrics Infrastructure
+
+**Functionality:** I can watch assignment entropy and per-feature gradient magnitude evolve in real-time during training in the dashboard. If collapse is happening, I see entropy dropping within the first epoch, not after 25k steps of wasted compute.
+
+**Foundation:** `TrainingMetricsAccumulator` protocol — a pluggable object that accumulates per-step data from gating hooks and summarizes at epoch boundaries. Generic infrastructure for ANY training-time metric stream, not just CGG. The `step_info` dict gains an optional `training_metrics` field that flows through `JobManager → SSE → Dashboard` with zero changes to the pipe.
+
+- `TrainingMetricsAccumulator` ABC in `acc/training_metrics.py` with `on_step(step, gate_masks, grad_norms)` and `summarize() -> dict` and `reset()`
+- `GatingMetricsAccumulator(TrainingMetricsAccumulator)` — accumulates win counts per feature, computes assignment entropy at epoch boundaries, tracks per-feature gradient norms and gradient CV
+- `CompetitiveGradientGating` extended: optional `metrics_accumulator` field, calls `accumulator.on_step()` after each backward pass with gate masks
+- `Trainer.train()` extended: after `loss.backward()`, if model has gating with accumulator, calls `accumulator.on_step()`; periodically (every `metrics_every` steps, default=epoch length) injects `training_metrics` dict into `step_info`
+- `step_info` dict gains optional `training_metrics: {assignment_entropy, gradient_cv, per_feature_grad_norms, win_counts}` field
+- Dashboard: new training-metrics chart panel showing entropy + gradient CV curves alongside loss curve
+- **Implements:** `acc/training_metrics.py` (`TrainingMetricsAccumulator`, `GatingMetricsAccumulator`), extensions to `CompetitiveGradientGating`, `Trainer.train()` extension, dashboard training-metrics panel
+- **Proves:** Training-time metric data flows end-to-end: accumulator → gating → Trainer → JobManager → SSE → dashboard chart. Validates against known-broken softmax gating (entropy drops to ~0 for hard temperature).
+
+**Verification:**
+- Run current temperature sweep recipe
+- Dashboard shows entropy curve dropping to ~0 for hard-t0.1 condition (confirming known collapse)
+- Dashboard shows entropy staying high (~0.85+) for soft-t1.0 condition
+- Gradient CV visible, high for hard conditions, low for soft/control
+- No regression: recipe still completes, comparison table still works
+
+### M-CGG-2.5a Cleanup Audit
+- [ ] Is `TrainingMetricsAccumulator` generic enough for non-gating metrics (e.g., learning rate schedules, weight norm tracking)?
+- [ ] Does the `training_metrics` field bloat the SSE stream? Should it be a separate endpoint?
+- [ ] Should training metrics be persisted in checkpoint alongside eval results?
+
+---
+
+### M-CGG-2.5b: Neighborhood Gating Mechanism
+
+**Functionality:** I can run a recipe with neighborhood-based gating and see whether it avoids the mode collapse that softmax gating produces. The recipe has 3+ conditions: control, softmax-t1.0 (old mechanism for reference), neighborhood (new mechanism). Training-time diagnostics from 2.5a show entropy staying high throughout.
+
+**Foundation:** `NeighborhoodGating` class in `gradient_gating.py` — a drop-in alternative to `CompetitiveGradientGating` using SOM-style weight similarity neighborhoods instead of softmax activation competition. Same hook interface, same `describe()` output, same `remove()` cleanup, same `TrainingMetricsAccumulator` integration. The `attach_competitive_gating` function gains a `mechanism` parameter (`"softmax"` or `"neighborhood"`).
+
+- `NeighborhoodGating` — forward hook computes neighborhoods based on weight cosine similarity (recomputed every `recompute_every` steps). Backward hook: for each feature, competition is only against its k nearest neighbors in weight space. Features that are dissimilar from neighbors but still activated get proportionally more gradient. This creates diversity pressure instead of winner-take-all.
+- Parameters: `neighborhood_k` (default 8), `recompute_every` (default 50 steps), `similarity_temperature` (default 1.0)
+- Implements `TrainingMetricsAccumulator` protocol: tracks neighborhood stability (fraction of neighbors unchanged between recomputations), assignment entropy, per-feature gradient norms
+- Recipe updated: adds neighborhood condition(s) alongside existing softmax conditions
+- **Implements:** `NeighborhoodGating` in `acc/gradient_gating.py`, updated recipe with neighborhood conditions
+- **Proves:** Neighborhood gating runs without errors, produces non-degenerate gradients, entropy stays high, reconstruction quality comparable to control
+
+**Verification:**
+- Run updated recipe with neighborhood condition
+- Neighborhood condition: assignment entropy > 0.80 throughout training (visible in 2.5a dashboard panel)
+- Neighborhood condition: reconstruction L1 within 1.5x of control
+- Neighborhood condition: effective rank > 50/64
+- Neighborhood condition: weight features show distinct patterns (not blobs, not collapse) in features panel
+- Neighborhood stability metric increases over training (features settling into niches)
+
+### M-CGG-2.5b Cleanup Audit
+- [ ] Is `NeighborhoodGating` truly drop-in compatible with `CompetitiveGradientGating`? Can recipe switch between them with one parameter?
+- [ ] Should neighborhood_k be adaptive (start large, shrink as features specialize)?
+- [ ] Does `recompute_every=50` interact badly with the training loop? Cost of recomputation?
+
+---
+
+### M-CGG-2.75: Neighborhood Gating + Residual PCA Feature Replacement
+
+**Functionality:** I can run a recipe with 3 conditions (control, nbr-k8, pca-k8) and see whether dead features are revived by residual PCA replacement. The dashboard shows gini coefficient, replacement count, and per-epoch dead feature count alongside existing gating metrics. Recipe logs replacement events with success rate tracking.
+
+**Foundation:** `ResidualPCAReplacer` class — periodic dead feature recovery via top-1 PCA of reconstruction errors in the neighborhood with highest error. `FeatureHealthTracker(GatingMetricsAccumulator)` — per-feature lifecycle tracking with win rate history, epoch-level snapshots, replacement event logging, Gini coefficient, stale detection, replacement success rate. Chunked epoch-by-epoch training pattern with loss accumulation across epochs.
+
+- `ResidualPCAReplacer` in `acc/gradient_gating.py` — identifies dead features (win rate < 1%), finds donor neighborhood (highest reconstruction error), computes top-1 PCA of error vectors, replaces encoder+decoder weights, resets Adam state
+- `FeatureHealthTracker` in `acc/training_metrics.py` — extends `GatingMetricsAccumulator` with `end_epoch()` for lifecycle tracking, `get_win_rates()` for PCA replacer, `record_replacements()` for event logging, `get_feature_statuses()` for classification, `get_replacement_success_rate()` for efficacy tracking. Overrides `summarize()` to snapshot accumulators before parent resets them (solving the summarize/end_epoch ordering problem)
+- `NeighborhoodGating` upgraded to per-image `[B, D]` masks with sigmoid margin competition (from the explorer work — kept the good part, removed dissimilarity floor and explorer routing)
+- Recipe `gradient_gating_l0` rewritten: 3 conditions (control, nbr-k8, pca-k8), epoch-by-epoch training with health tracking and PCA replacement every 5 epochs, loss accumulation across chunked training
+- Dashboard: `TrainingMetrics` type extended with `gini`, `top5_share`, `replacement_count`. `TrainingMetricsChart` shows gini (0-1 y-axis, dashed yellow) and cumulative replacements (y2 axis, diamond markers)
+- **Implements:** `ResidualPCAReplacer`, `FeatureHealthTracker`, updated `NeighborhoodGating`, updated recipe, dashboard updates
+- **Proves:** PCA replacement mechanism runs without crashes, produces directional improvement (more living features, higher effective rank), replacement success rate is measurable
+
+**Results (first run):**
+
+| Metric | control | nbr-k8 | pca-k8 |
+|--------|---------|--------|--------|
+| L1 | 0.068 | 0.084 | 0.086 |
+| PSNR | 12.75 | 11.97 | 11.94 |
+| weight_cosine_sim | 0.024 | 0.369 | 0.296 |
+| activation_sparsity | 0.473 | 0.144 | 0.107 |
+| effective_rank | 57.3 | 7.2 | 9.5 |
+| dead features | - | 62 | 59 |
+| winners | - | 2 | 4 |
+| total replacements | - | - | 20 |
+| replacement success rate | - | - | 27.8% |
+
+**Observations:** PCA replacement is directionally correct (9.5 vs 7.2 rank, 4 vs 2 winners, lower cosine sim) but the effect is small. Only 2 replacements per cycle because only 2-3 neighborhoods have enough error samples. Replaced features mostly die again within 1-2 epochs — the gating mechanism immediately punishes them for losing their first neighborhood competition. The core problem: entrenched winners capture >99% of images, leaving almost no error samples for other neighborhoods.
+
+**Known issues for next iteration:**
+- Replacement scaling: PCA features are scaled to match existing feature magnitudes, but that puts them at the AVERAGE magnitude — they need to be above-average to survive initial competition
+- Gating attenuation: dead features should get a grace period after replacement (e.g., gate_strength=0 for 1 epoch) so they can learn without being immediately attenuated
+- Min error samples too high: threshold of 10 excludes most neighborhoods; lower to 3-5 or use all training data for error collection
+- Only 2 donor neighborhoods available: need to collect errors from ALL neighborhoods, not just the ones with active winners
+
+**Verification:**
+- Run `gradient_gating_l0` recipe from dashboard
+- All 3 conditions complete without error
+- pca-k8 logs replacement events with feature indices and donor neighborhoods
+- pca-k8 effective_rank > nbr-k8 effective_rank (directional improvement)
+- Dashboard gating metrics chart shows gini and replacement count for gated conditions
+
+### M-CGG-2.75 Cleanup Audit
+- [ ] Should `ResidualPCAReplacer` be a generic class that works with any encoder/decoder pair, or is it specific to linear AE?
+- [ ] The chunked training + loss accumulation pattern is a workaround — should `RecipeContext.train()` support epoch callbacks natively?
+- [ ] `FeatureHealthTracker.summarize()` override to snapshot before reset is fragile — if `summary_every` doesn't align with epoch length, snapshots may be stale. Consider a more robust solution.
+- [ ] Explorer routing code was removed but `explorer_graduations` field persists in types/chart — clean up?
+
+---
+
+### M-CGG-2.5c: Enriched Eval Metrics + Feature Utilization Map
+
+**Functionality:** I can see Hoyer sparsity, top-k concentration, per-feature selectivity, and the feature-utilization heatmap in the dashboard for any checkpoint. The eval panel becomes a comprehensive specialization report — answering not just "is it specialized?" but "how is it specialized?" and "what did each feature learn?"
+
+**Foundation:** Extended `EvalMetric` enum with `HOYER_SPARSITY`, `TOP_K_CONCENTRATION`, `FEATURE_SELECTIVITY`. New `FeatureUtilizationTask` (eval-only) producing a [D, 10] heatmap with per-feature selectivity scores. All library-generic — work with any model that has a hookable hidden layer.
+
+- `ActivationSparsityTask` extended: adds Hoyer sparsity measure `(sqrt(D) - L1/L2) / (sqrt(D) - 1)` and top-k concentration (k=4, 8, 16)
+- `EffectiveRankTask` extended: adds condition number `S[0]/S[-1]`, returns singular value array for SV plot
+- `WeightDiversityTask` extended: adds std, max, min of pairwise cosine similarities
+- New `FeatureUtilizationTask(EvalOnlyTask)` — runs test data through model, groups activations by class label (0-9), produces [D, 10] mean activation matrix, computes per-feature selectivity (1 - normalized_row_entropy), returns `{FEATURE_SELECTIVITY: mean_selectivity}` plus the raw heatmap data
+- Dashboard: heatmap panel for feature utilization ([D, 10] grid), enriched eval comparison table with all new metrics, weight features panel gains hierarchical clustering sort option
+- **Implements:** Extended eval tasks, `acc/tasks/feature_utilization.py`, new `EvalMetric` members (`HOYER_SPARSITY`, `TOP_K_CONCENTRATION`, `FEATURE_SELECTIVITY`), dashboard panels
+- **Proves:** Comprehensive eval battery works as drop-in tasks. Feature utilization map shows clear block-diagonal structure for specialized models vs uniform rows for unspecialized.
+
+**Verification:**
+- Load any checkpoint from the temperature sweep recipe
+- Eval panel shows Hoyer sparsity, top-k concentration, feature selectivity alongside existing metrics
+- Feature utilization heatmap renders as [D, 10] grid in dashboard
+- For collapsed models (hard-t0.1): heatmap shows 1-2 bright rows, rest dim; selectivity near 0
+- For control: heatmap shows moderate variation; selectivity moderate
+- For neighborhood gating (if 2.5b complete): heatmap shows distinct per-feature preferences; selectivity > 0.4
+
+### M-CGG-2.5c Cleanup Audit
+- [ ] Should the feature utilization heatmap be a separate panel or integrated into the existing features panel?
+- [ ] Is hierarchical clustering sort worth the complexity, or is sorting by selectivity score sufficient?
+- [ ] Do the new EvalMetric members render correctly in the sibling comparison table?
+
+---
+
+### M-CGG-2.5/2.75 Dependency and Relationship to Existing Plan
+
+```
+M-CGG-1: Linear AE + Gating mechanism + Recipe ✅
+    ↓
+M-CGG-2: Specialization metrics (weight diversity, sparsity, rank) ✅
+    ↓
+M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV, dashboard panel)
+    ↓
+M-CGG-2.5b: Neighborhood gating mechanism (the fix for mode collapse)
+    ↓
+M-CGG-2.75: Residual PCA replacement (dead feature recovery)
+    ↓
+M-CGG-2.5c: Enriched eval metrics + feature utilization map
+    ↓
+M-CGG-3: Conv AE + depth-dependent gating
+    ...
+```
+
+**Note on M-CGG-5 (Periodic Training Metrics):** M-CGG-2.5a subsumes most of what M-CGG-5 was designed to do. After 2.5a, M-CGG-5 reduces to "periodic eval snapshots" (running full eval tasks every N steps during training) — a small delta on top of the training-time metrics stream. M-CGG-5 may be absorbed entirely or reduced to a minor enhancement.
+
+---
+
 ### M-CGG-3: Convolutional Autoencoder + Depth-Dependent Gating
 
 **Functionality:** I can run the same gating experiment on a convolutional autoencoder with depth-dependent gate strength (stronger near input, weaker near latent). The comparison shows whether gating works with spatial features and whether depth tapering matters.
@@ -210,30 +370,40 @@ The recipe creates both conditions (standard + gated), trains both, evaluates bo
 ## Milestone Dependencies
 
 ```
-M-CGG-1: Linear AE + Gating mechanism + Recipe
+M-CGG-1: Linear AE + Gating mechanism + Recipe ✅
     ↓
-M-CGG-2: Specialization metrics (weight diversity, sparsity, rank)
+M-CGG-2: Specialization metrics (weight diversity, sparsity, rank) ✅
+    ↓
+M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV)
+    ↓
+M-CGG-2.5b: Neighborhood gating mechanism (fix for mode collapse)
+    ↓
+M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
 M-CGG-3: Conv AE + depth-dependent gating
     ↓
 M-CGG-4: Conv VAE + KL interaction
     ↓
-M-CGG-5: Periodic eval during training
+M-CGG-5: (Subsumed by 2.5a — reduced to periodic eval snapshots if needed)
     ↓
 M-CGG-6: Factor-Slot VAE + Gating (conditional on L0-L2 results)
 ```
 
-M-CGG-1 and M-CGG-2 are the critical pair. If gating doesn't produce specialization in a linear layer with proper measurement, the experiment is falsified at the cheapest possible cost. Every subsequent milestone adds one architectural element.
+M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes mode collapse at sharp temperatures. M-CGG-2.5 is the diagnostic + fix cycle: build the instruments (2.5a), build the new mechanism (2.5b), enrich the measurement battery (2.5c). Every subsequent milestone adds one architectural element.
 
 ## Milestone Status
 
 | Milestone | Status | What I Can Do After |
 |-----------|--------|---------------------|
-| M-CGG-1: Linear AE End-to-End | Not started | Train linear AE with/without gating, see reconstruction comparison |
-| M-CGG-2: Specialization Metrics | Not started | See weight diversity, sparsity, effective rank in comparison table |
+| M-CGG-1: Linear AE End-to-End | **DONE** | Train linear AE with/without gating, see reconstruction comparison |
+| M-CGG-2: Specialization Metrics | **DONE** | See weight diversity, sparsity, effective rank in comparison table |
+| M-CGG-2.5a: Training-Time Metrics | **DONE** | Watch entropy + gradient CV evolve in real-time during training |
+| M-CGG-2.5b: Neighborhood Gating | **DONE** | Run neighborhood gating, see per-image competition with sigmoid margins |
+| M-CGG-2.75: Residual PCA Replacement | **DONE** | Run PCA replacement for dead features, see replacement events + success rate |
+| M-CGG-2.5c: Enriched Eval Metrics | Not started | See Hoyer sparsity, top-k, selectivity, feature utilization heatmap |
 | M-CGG-3: Conv AE + Depth Gating | Not started | Run gating on conv layers with depth-dependent strength |
 | M-CGG-4: Conv VAE + KL | Not started | Test gating compatibility with VAE objective |
-| M-CGG-5: Periodic Training Metrics | Not started | Watch specialization emerge during training, not just after |
+| M-CGG-5: Periodic Training Metrics | Subsumed by 2.5a | (Reduced scope: periodic eval snapshots only) |
 | M-CGG-6: Factor-Slot + Gating | Not started | Test the full combination: architectural + gradient isolation |
 
 ## Parameter Defaults

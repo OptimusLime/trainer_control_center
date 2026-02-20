@@ -137,6 +137,11 @@ export const $jobHistory = computed($dashboard, s => s.jobHistory);
 export const $checkpointTree = computed($dashboard, s => s.checkpointTree);
 export const $checkpointCurrentId = computed($dashboard, s => s.checkpointCurrentId);
 
+/** Training-time metrics entries (sparse — only steps with training_metrics). */
+export const $trainingMetrics = computed($dashboard, s =>
+  s.lossHistory.filter(e => e.training_metrics != null)
+);
+
 /** The job ID whose loss data we're displaying. */
 export const $activeJobId = computed($dashboard, s => {
   // Running job takes priority

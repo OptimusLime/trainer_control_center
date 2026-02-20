@@ -373,11 +373,15 @@ class TrainerAPI:
             if len(losses) <= max_points:
                 return losses
 
-            # Group by task_name, downsample each, merge back in step order
+            # Group by task_name, downsample each, merge back in step order.
+            # Always preserve entries with training_metrics (sparse, high-value).
             from collections import defaultdict
             by_task: dict[str, list[dict]] = defaultdict(list)
+            metrics_entries = []
             for entry in losses:
                 by_task[entry.get("task_name", "?")].append(entry)
+                if "training_metrics" in entry:
+                    metrics_entries.append(entry)
 
             result = []
             for task_entries in by_task.values():
@@ -391,6 +395,12 @@ class TrainerAPI:
                     if task_entries[-1] not in sampled:
                         sampled.append(task_entries[-1])
                     result.extend(sampled)
+
+            # Always include training_metrics entries (they're rare — ~1 per epoch)
+            seen_steps = {e.get("step") for e in result}
+            for me in metrics_entries:
+                if me.get("step") not in seen_steps:
+                    result.append(me)
 
             result.sort(key=lambda e: e.get("step", 0))
             return result

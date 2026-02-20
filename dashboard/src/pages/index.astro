@@ -1,6 +1,7 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import LossChart from '../components/LossChart.tsx';
+import TrainingMetricsChart from '../components/TrainingMetricsChart.tsx';
 ---
 
 <Layout title="ACC Dashboard">
@@ -109,6 +110,9 @@ import LossChart from '../components/LossChart.tsx';
         <h3>Loss Curves</h3>
         <LossChart client:load />
       </div>
+
+      <!-- Training Metrics (gating entropy, gradient CV) — auto-hides when no data -->
+      <TrainingMetricsChart client:load />
 
       <!-- Eval -->
       <div class="panel" id="eval-panel">
@@ -855,22 +859,27 @@ import LossChart from '../components/LossChart.tsx';
     (btnFeatures as HTMLButtonElement).disabled = loading;
   });
 
-  $featureSiblings.subscribe(data => {
+  let featureScale = 3; // 3x = 84px per 28px feature. Adjustable via slider.
+
+  function renderFeatures() {
+    const data = $featureSiblings.get();
     if (!data || data.siblings.length === 0) return;
 
     const { siblings, current_id, n_features, image_shape } = data;
-    const imgW = image_shape[1] || 28;
-    const imgH = image_shape[0] || 28;
-
-    // Show features as grid: one row per sibling checkpoint, columns = feature index
-    // For 64 features, show 8x8 grid per checkpoint
+    const nativeW = image_shape[1] || 28;
+    const nativeH = image_shape[0] || 28;
+    const dispW = nativeW * featureScale;
+    const dispH = nativeH * featureScale;
     const gridCols = 8;
-    const gridRows = Math.ceil(n_features / gridCols);
 
     let html = `
       <div class="panel-header">
         <h3>Weight Features</h3>
-        <button class="btn-action" id="btn-features">Load Features</button>
+        <div class="features-controls">
+          <label class="features-scale-label">Scale: ${featureScale}x</label>
+          <input type="range" id="feature-scale" min="1" max="6" step="1" value="${featureScale}" class="features-slider" />
+          <button class="btn-action" id="btn-features">Reload</button>
+        </div>
       </div>
       <div class="features-comparison">
     `;
@@ -878,23 +887,60 @@ import LossChart from '../components/LossChart.tsx';
     for (const sib of siblings) {
       const isCurrent = sib.id === current_id;
       const label = esc(sib.tag);
+      const desc = sib.description ? ` — ${esc(sib.description)}` : '';
       const cls = isCurrent ? ' features-current' : '';
 
       html += `<div class="features-block${cls}">`;
-      html += `<div class="features-label">${label}</div>`;
-      html += `<div class="features-grid" style="grid-template-columns: repeat(${gridCols}, ${imgW}px);">`;
+      html += `<div class="features-label">${label}${desc}</div>`;
+      html += `<div class="features-grid" style="grid-template-columns: repeat(${gridCols}, ${dispW}px); gap: 2px;">`;
       for (let i = 0; i < n_features && i < sib.features.length; i++) {
-        html += `<img src="data:image/png;base64,${sib.features[i]}" width="${imgW}" height="${imgH}" class="feature-img" title="Feature ${i}" />`;
+        html += `<img src="data:image/png;base64,${sib.features[i]}" width="${dispW}" height="${dispH}" class="feature-img" data-idx="${i}" title="Feature ${i}" />`;
       }
       html += `</div></div>`;
     }
 
     html += `</div>`;
+
+    // Zoom overlay (hidden by default, shown on click)
+    html += `<div id="feature-zoom-overlay" class="feature-zoom-overlay" style="display:none;">
+      <img id="feature-zoom-img" class="feature-zoom-img" />
+      <div id="feature-zoom-caption" class="feature-zoom-caption"></div>
+    </div>`;
+
     featuresPanel.innerHTML = html;
 
-    // Re-attach button handler
+    // Re-attach handlers
     document.getElementById('btn-features')!.addEventListener('click', () => fetchFeatureSiblings());
-  });
+
+    const slider = document.getElementById('feature-scale') as HTMLInputElement;
+    slider.addEventListener('input', () => {
+      featureScale = parseInt(slider.value);
+      renderFeatures();
+    });
+
+    // Click-to-zoom: clicking any feature image shows it large
+    const overlay = document.getElementById('feature-zoom-overlay')!;
+    const zoomImg = document.getElementById('feature-zoom-img') as HTMLImageElement;
+    const zoomCaption = document.getElementById('feature-zoom-caption')!;
+
+    featuresPanel.querySelectorAll('.feature-img').forEach(img => {
+      img.addEventListener('click', (e) => {
+        const el = e.currentTarget as HTMLImageElement;
+        zoomImg.src = el.src;
+        const idx = el.getAttribute('data-idx') || '?';
+        const block = el.closest('.features-block');
+        const label = block?.querySelector('.features-label')?.textContent || '';
+        zoomCaption.textContent = `${label} — Feature ${idx}`;
+        overlay.style.display = 'flex';
+      });
+    });
+
+    overlay.addEventListener('click', () => {
+      overlay.style.display = 'none';
+    });
+  }
+
+  $featureSiblings.subscribe(() => renderFeatures());
 
   // --- M-UI-5: Tasks Panel ---
   const tasksPanel = document.getElementById('tasks-panel')!;

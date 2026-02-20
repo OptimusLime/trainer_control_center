@@ -222,6 +222,7 @@ class RecipeContext:
         probe_lr: float = 1e-3,
         batch_size: int = 64,
         task_weights: Optional[dict[str, float]] = None,
+        training_metrics_fn: Optional[Callable] = None,
     ) -> list[dict]:
         """Train for N steps. Routes through JobManager so losses are visible in the dashboard.
 
@@ -233,6 +234,10 @@ class RecipeContext:
             task_weights: Optional dict mapping task_name -> sampling weight.
                 Weights are relative — {"recon": 9, "kl": 1} means recon
                 is sampled 90% of steps.  If None, uniform sampling.
+            training_metrics_fn: Optional callable(step) -> dict or None.
+                Passed to Trainer.train(). Used by gating mechanisms to
+                inject training-time metrics (entropy, gradient CV) into
+                the step_info stream.
         """
         if self._stopped:
             return []
@@ -253,6 +258,7 @@ class RecipeContext:
             checkpoint_id=self.current_checkpoint_id,
             blocking=True,
             task_weights=task_weights,
+            training_metrics_fn=training_metrics_fn,
         )
         return job.losses
 

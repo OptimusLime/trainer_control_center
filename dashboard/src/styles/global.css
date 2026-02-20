@@ -556,14 +556,28 @@ body {
 }
 
 /* --- Weight Features --- */
+.features-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.features-scale-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.features-slider {
+  width: 80px;
+  accent-color: var(--blue);
+}
 .features-comparison {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   overflow-x: auto;
 }
 .features-block {
-  padding: 8px;
+  padding: 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
 }
@@ -574,15 +588,42 @@ body {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--text-bright);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .features-grid {
   display: grid;
-  gap: 1px;
 }
 .feature-img {
   image-rendering: pixelated;
   display: block;
+  cursor: pointer;
+  border-radius: 1px;
+}
+.feature-img:hover {
+  outline: 2px solid var(--blue);
+  outline-offset: -1px;
+}
+/* Zoom overlay */
+.feature-zoom-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: pointer;
+}
+.feature-zoom-img {
+  image-rendering: pixelated;
+  width: min(80vw, 80vh);
+  height: min(80vw, 80vh);
+}
+.feature-zoom-caption {
+  color: var(--text-bright);
+  font-size: 0.9rem;
+  margin-top: 12px;
 }
 
 /* --- M-UI-5: Tasks --- */

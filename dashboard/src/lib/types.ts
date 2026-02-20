@@ -41,12 +41,29 @@ export interface JobDict {
   error: string | null;
 }
 
+export interface TrainingMetrics {
+  assignment_entropy?: number;
+  gradient_cv?: number;
+  dead_features?: number;
+  gradient_starved_features?: number;
+  win_entropy?: number;
+  win_counts?: number[];
+  per_feature_grad_norms?: number[];
+  neighborhood_stability?: number;
+  coverage_cv?: number;
+  explorer_graduations?: number;
+  gini?: number;
+  top5_share?: number;
+  replacement_count?: number;
+}
+
 export interface LossEntry {
   step: number;
   task_name: string;
   task_type: string;
   task_loss: number;
   health: 'healthy' | 'warning' | 'critical';
+  training_metrics?: TrainingMetrics;
 }
 
 export interface LossSummaryEntry {

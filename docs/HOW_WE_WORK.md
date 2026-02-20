@@ -393,6 +393,38 @@ If ANY answer is negative, the task is NOT DONE. Return to debugging.
 
 ---
 
+## The Dashboard Is The Tool
+
+**CRITICAL: We built a dashboard. Use it. Always.**
+
+### The Rule
+
+All visualization, analysis, comparison, and inspection of model state MUST go through the dashboard. If the dashboard can't do something you need, **add it to the dashboard**. Never work around it.
+
+### What We NEVER Do
+
+- **Never save images to /tmp** or any local directory for manual inspection
+- **Never write ad-hoc Python scripts** to visualize weights, activations, features, or any model state
+- **Never analyze data by dumping it to the console** when it should be a dashboard panel
+- **Never do manual analysis that the dashboard should do for you**
+
+### What We DO
+
+- If we need to see something, we add a panel or endpoint to the dashboard
+- If a panel is too small or hard to read, we fix the panel's CSS/layout
+- If we need to compare things, we build the comparison into the dashboard
+- The dashboard is the single source of truth for all model inspection
+
+### Why This Matters
+
+The entire point of the dashboard is to make model development interactive and visual. Every time we bypass it with an ad-hoc script, we:
+1. Lose the work (scripts are throwaway, dashboard panels persist)
+2. Can't share the view (dashboard is accessible via Tailscale, /tmp is not)
+3. Can't iterate (a panel can be refreshed, a script must be re-run)
+4. Violate the library-centric rule (ad-hoc scripts are the ultimate feature-specific code)
+
+---
+
 ## Summary
 
 1. **Dual nature** - Every phase has functionality AND foundation; state both explicitly
@@ -408,6 +440,7 @@ If ANY answer is negative, the task is NOT DONE. Return to debugging.
 11. **Stay honest** - PR checklists reflect reality, not aspirations
 12. **Evaluate objectively** - See what IS, not what you HOPE to see
 13. **Quality gates** - "Does it work?" is not the same as "Is it good enough?"
+14. **Use the dashboard** - All visualization and analysis goes through the dashboard, never ad-hoc scripts
 
 ---
 
