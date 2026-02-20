@@ -33,6 +33,8 @@ const COVERAGE_CV_COLOR = '#d2a8ff';  // purple
 const GRADUATION_COLOR = '#56d364';   // bright green
 const GINI_COLOR = '#e3b341';         // yellow
 const REPLACEMENT_COLOR = '#79c0ff';  // light blue
+const UNREACHABLE_COLOR = '#ff6b6b'; // coral red (BCL)
+const SOM_MAG_COLOR = '#7ee787';     // bright green (BCL)
 
 function buildDatasets(entries: LossEntry[]) {
   const entropyPoints: { x: number; y: number }[] = [];
@@ -43,6 +45,8 @@ function buildDatasets(entries: LossEntry[]) {
   const graduationPoints: { x: number; y: number }[] = [];
   const giniPoints: { x: number; y: number }[] = [];
   const replacementPoints: { x: number; y: number }[] = [];
+  const unreachablePoints: { x: number; y: number }[] = [];
+  const somMagPoints: { x: number; y: number }[] = [];
 
   for (const e of entries) {
     const m = e.training_metrics;
@@ -70,6 +74,12 @@ function buildDatasets(entries: LossEntry[]) {
     }
     if (m.replacement_count != null && m.replacement_count > 0) {
       replacementPoints.push({ x: e.step, y: m.replacement_count });
+    }
+    if (m.unreachable_count != null) {
+      unreachablePoints.push({ x: e.step, y: m.unreachable_count });
+    }
+    if (m.som_magnitude_mean != null) {
+      somMagPoints.push({ x: e.step, y: m.som_magnitude_mean });
     }
   }
 
@@ -199,6 +209,37 @@ function buildDatasets(entries: LossEntry[]) {
     });
   }
 
+  if (unreachablePoints.length > 0) {
+    datasets.push({
+      label: 'Unreachable Features (BCL)',
+      data: unreachablePoints,
+      borderColor: UNREACHABLE_COLOR,
+      backgroundColor: UNREACHABLE_COLOR + '20',
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      tension: 0.2,
+      fill: false,
+      yAxisID: 'y2',
+    });
+  }
+
+  if (somMagPoints.length > 0) {
+    datasets.push({
+      label: 'SOM Magnitude (BCL)',
+      data: somMagPoints,
+      borderColor: SOM_MAG_COLOR,
+      backgroundColor: SOM_MAG_COLOR + '20',
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      tension: 0.2,
+      fill: false,
+      yAxisID: 'y2',
+      borderDash: [4, 4],
+    });
+  }
+
   return datasets;
 }
 
@@ -262,7 +303,7 @@ export default function TrainingMetricsChart() {
                   const status = val > 0.85 ? 'healthy' : val > 0.5 ? 'moderate' : 'collapsing';
                   return `${label}: ${val.toFixed(4)} (${status})`;
                 }
-                if (label === 'Dead Features' || label === 'Explorer Graduations' || label === 'Replacements (cumulative)') {
+                if (label === 'Dead Features' || label === 'Explorer Graduations' || label === 'Replacements (cumulative)' || label === 'Unreachable Features (BCL)') {
                   return `${label}: ${val.toFixed(0)}`;
                 }
                 if (label === 'Coverage CV') {

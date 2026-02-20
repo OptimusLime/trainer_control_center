@@ -35,6 +35,9 @@ import type {
   AttentionMapsResponse,
   EvalSiblingsResponse,
   FeatureSiblingsResponse,
+  SnapshotTagsResponse,
+  SnapshotIndexResponse,
+  SnapshotFrameResponse,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,12 @@ export interface DashboardState {
   sortByFactorLoading: boolean;
   attentionMaps: AttentionMapsResponse | null;
   attentionMapsLoading: boolean;
+  // Feature weight snapshots (timeline)
+  snapshotTags: string[];
+  snapshotIndex: SnapshotIndexResponse | null;
+  snapshotFrames: Record<number, SnapshotFrameResponse>;  // step -> frame
+  snapshotLoading: boolean;
+  snapshotCurrentStep: number;  // which frame is displayed
 }
 
 const INITIAL: DashboardState = {
@@ -102,6 +111,8 @@ const INITIAL: DashboardState = {
   checkpointComparison: null,
   compareLoading: false,
   evalSiblings: null,
+  featureSiblings: null,
+  featureSiblingsLoading: false,
   tasks: [],
   registryTasks: [],
   datasets: [],
@@ -115,6 +126,11 @@ const INITIAL: DashboardState = {
   sortByFactorLoading: false,
   attentionMaps: null,
   attentionMapsLoading: false,
+  snapshotTags: [],
+  snapshotIndex: null,
+  snapshotFrames: {},
+  snapshotLoading: false,
+  snapshotCurrentStep: -1,
 };
 
 export const $dashboard = atom<DashboardState>(INITIAL);
@@ -304,6 +320,13 @@ export const $sortByFactor = computed($dashboard, s => s.sortByFactor);
 export const $sortByFactorLoading = computed($dashboard, s => s.sortByFactorLoading);
 export const $attentionMaps = computed($dashboard, s => s.attentionMaps);
 export const $attentionMapsLoading = computed($dashboard, s => s.attentionMapsLoading);
+
+// Feature weight snapshot slices
+export const $snapshotTags = computed($dashboard, s => s.snapshotTags);
+export const $snapshotIndex = computed($dashboard, s => s.snapshotIndex);
+export const $snapshotFrames = computed($dashboard, s => s.snapshotFrames);
+export const $snapshotLoading = computed($dashboard, s => s.snapshotLoading);
+export const $snapshotCurrentStep = computed($dashboard, s => s.snapshotCurrentStep);
 
 // ---------------------------------------------------------------------------
 // Eval actions (button-triggered, not polled)
@@ -565,4 +588,98 @@ export async function fetchAttentionMaps() {
     attentionMaps: result ?? cur.attentionMaps,
     attentionMapsLoading: false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Feature weight snapshot actions
+// ---------------------------------------------------------------------------
+
+/** Fetch available snapshot tags from the API. */
+export async function fetchSnapshotTags() {
+  const result = await fetchJSON<SnapshotTagsResponse>('/eval/features/snapshots');
+  if (result) {
+    const prev = $dashboard.get();
+    $dashboard.set({ ...prev, snapshotTags: result.tags });
+  }
+}
+
+/** Fetch the step index for a given tag, then load the first frame. */
+export async function loadSnapshotTimeline(tag: string) {
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, snapshotLoading: true, snapshotFrames: {}, snapshotCurrentStep: -1 });
+
+  const index = await fetchJSON<SnapshotIndexResponse>(
+    `/eval/features/snapshots?tag=${encodeURIComponent(tag)}`
+  );
+  if (!index || index.steps.length === 0) {
+    const cur = $dashboard.get();
+    $dashboard.set({ ...cur, snapshotIndex: index, snapshotLoading: false });
+    return;
+  }
+
+  const cur = $dashboard.get();
+  $dashboard.set({ ...cur, snapshotIndex: index });
+
+  // Load the first frame automatically
+  await loadSnapshotFrame(tag, index.steps[0].step);
+}
+
+/** Fetch a single snapshot frame and cache it. */
+export async function loadSnapshotFrame(tag: string, step: number) {
+  const prev = $dashboard.get();
+  // If already cached, just switch
+  if (prev.snapshotFrames[step]) {
+    $dashboard.set({ ...prev, snapshotCurrentStep: step, snapshotLoading: false });
+    return;
+  }
+
+  $dashboard.set({ ...prev, snapshotLoading: true });
+  const frame = await fetchJSON<SnapshotFrameResponse>(
+    `/eval/features/snapshots?tag=${encodeURIComponent(tag)}&step=${step}`
+  );
+  const cur = $dashboard.get();
+  if (frame) {
+    $dashboard.set({
+      ...cur,
+      snapshotFrames: { ...cur.snapshotFrames, [step]: frame },
+      snapshotCurrentStep: step,
+      snapshotLoading: false,
+    });
+  } else {
+    $dashboard.set({ ...cur, snapshotLoading: false });
+  }
+}
+
+/** Preload all frames for smooth playback. */
+export async function preloadAllSnapshotFrames(tag: string) {
+  const index = $dashboard.get().snapshotIndex;
+  if (!index) return;
+
+  const prev = $dashboard.get();
+  $dashboard.set({ ...prev, snapshotLoading: true });
+
+  // Load frames in batches of 4 to avoid overwhelming the server
+  const steps = index.steps.map(s => s.step);
+  const cached = $dashboard.get().snapshotFrames;
+  const uncached = steps.filter(s => !cached[s]);
+
+  for (let i = 0; i < uncached.length; i += 4) {
+    const batch = uncached.slice(i, i + 4);
+    const frames = await Promise.all(
+      batch.map(s =>
+        fetchJSON<SnapshotFrameResponse>(
+          `/eval/features/snapshots?tag=${encodeURIComponent(tag)}&step=${s}`
+        )
+      )
+    );
+    const cur = $dashboard.get();
+    const newFrames = { ...cur.snapshotFrames };
+    for (const f of frames) {
+      if (f) newFrames[f.step] = f;
+    }
+    $dashboard.set({ ...cur, snapshotFrames: newFrames });
+  }
+
+  const cur = $dashboard.get();
+  $dashboard.set({ ...cur, snapshotLoading: false });
 }

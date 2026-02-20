@@ -466,3 +466,215 @@ class FeatureHealthTracker(GatingMetricsAccumulator):
         if eligible == 0:
             return None
         return successes / eligible
+
+
+class BCLHealthTracker(FeatureHealthTracker):
+    """Health tracker for Bidirectional Competitive Learning.
+
+    Extends FeatureHealthTracker with BCL-specific metrics:
+    - Per-feature grad_magnitude and som_magnitude accumulation (for signal scatter)
+    - Unreachable feature count (low grad AND low SOM)
+    - Win rate history per step (for heatmap, logged every log_every steps)
+    - Dead neighborhood diversity (bottom-20 pairwise cosine similarity)
+    - Novelty and crowding statistics
+
+    The recipe calls record_bcl_step() with the dict from BCL.get_step_metrics()
+    after each forward pass. This replaces the parent's on_step() for gate masks
+    since BCL provides richer data.
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        summary_every: int = 469,
+        log_every: int = 500,
+        unreachable_grad_threshold: float = 0.1,
+        unreachable_som_threshold: float = 0.1,
+    ):
+        super().__init__(num_features=num_features, summary_every=summary_every)
+        self.log_every = log_every
+        self.unreachable_grad_threshold = unreachable_grad_threshold
+        self.unreachable_som_threshold = unreachable_som_threshold
+
+        # Per-epoch accumulators for BCL-specific signals
+        self._grad_mag_sum = torch.zeros(num_features)
+        self._som_mag_sum = torch.zeros(num_features)
+        self._win_rate_sum = torch.zeros(num_features)
+        self._novelty_sum = 0.0
+        self._novelty_sq_sum = 0.0
+        self._crowding_sum = 0.0
+        self._crowding_sq_sum = 0.0
+        self._bcl_steps = 0
+
+        # Step-level logs for scatter plot and heatmap (sparse, every log_every)
+        self.signal_scatter_log: list[dict] = []   # [{step, grad_mag[D], som_mag[D], win_rate[D]}]
+        self.win_rate_log: list[dict] = []          # [{step, win_rate[D]}]
+        self.dead_diversity_log: list[dict] = []    # [{step, mean_similarity}]
+
+    def record_bcl_step(self, step: int, metrics: dict, encoder_weight: Optional[torch.Tensor] = None) -> None:
+        """Record one BCL training step's metrics.
+
+        Args:
+            step: Current training step (1-indexed).
+            metrics: Dict from BCL.get_step_metrics().
+            encoder_weight: Optional [D, in_features] weight tensor for diversity calc.
+        """
+        self._bcl_steps += 1
+
+        win_rate = metrics['win_rate'].detach().cpu()       # [D]
+        grad_mag = metrics['grad_magnitude'].detach().cpu()  # [D]
+        som_mag = metrics['som_magnitude'].detach().cpu()    # [D]
+
+        self._grad_mag_sum += grad_mag
+        self._som_mag_sum += som_mag
+        self._win_rate_sum += win_rate
+        self._novelty_sum += metrics['mean_novelty']
+        self._novelty_sq_sum += metrics['mean_novelty'] ** 2
+        self._crowding_sum += metrics['mean_crowding']
+        self._crowding_sq_sum += metrics['mean_crowding'] ** 2
+
+        # Feed parent's accumulators: synthesize a [B,D]-style gate mask
+        # from win_rate so parent's win counting / entropy still works.
+        # We pass the rank_score mean as a [1, D] mask.
+        fake_mask = win_rate.unsqueeze(0)  # [1, D]
+        self.on_step(step=step, gate_masks={"bcl": fake_mask}, grad_norms=None)
+
+        # Sparse logging for dashboard panels
+        if step % self.log_every == 0:
+            self.signal_scatter_log.append({
+                'step': step,
+                'grad_magnitude': grad_mag.tolist(),
+                'som_magnitude': som_mag.tolist(),
+                'win_rate': win_rate.tolist(),
+            })
+            self.win_rate_log.append({
+                'step': step,
+                'win_rate': win_rate.tolist(),
+            })
+
+            # Dead neighborhood diversity: bottom-20 by win rate
+            if encoder_weight is not None:
+                W = encoder_weight.detach().cpu()
+                W_flat = W.view(W.size(0), -1)
+                W_norm = torch.nn.functional.normalize(W_flat, dim=1)
+
+                # Bottom-20 features by win rate
+                _, bottom_idx = win_rate.topk(min(20, len(win_rate)), largest=False)
+                if len(bottom_idx) >= 2:
+                    bottom_w = W_norm[bottom_idx]  # [20, in_features]
+                    sim = bottom_w @ bottom_w.T     # [20, 20]
+                    # Exclude diagonal
+                    n = sim.size(0)
+                    mask = ~torch.eye(n, dtype=torch.bool)
+                    mean_sim = sim[mask].mean().item()
+                    self.dead_diversity_log.append({
+                        'step': step,
+                        'mean_similarity': round(mean_sim, 4),
+                    })
+
+    def summarize(self) -> dict:
+        """Override to inject BCL-specific metrics into dashboard stream."""
+        result = super().summarize()
+
+        if self._bcl_steps > 0:
+            n = self._bcl_steps
+            mean_grad = self._grad_mag_sum / n
+            mean_som = self._som_mag_sum / n
+            mean_wr = self._win_rate_sum / n
+
+            result['grad_magnitude_mean'] = round(mean_grad.mean().item(), 4)
+            result['som_magnitude_mean'] = round(mean_som.mean().item(), 4)
+            result['mean_novelty'] = round(self._novelty_sum / n, 4)
+            result['mean_crowding'] = round(self._crowding_sum / n, 4)
+
+            # Unreachable features: low grad AND low SOM
+            unreachable = (
+                (mean_grad < self.unreachable_grad_threshold) &
+                (mean_som < self.unreachable_som_threshold)
+            ).sum().item()
+            result['unreachable_count'] = int(unreachable)
+
+        # Reset BCL-specific accumulators
+        self._grad_mag_sum.zero_()
+        self._som_mag_sum.zero_()
+        self._win_rate_sum.zero_()
+        self._novelty_sum = 0.0
+        self._novelty_sq_sum = 0.0
+        self._crowding_sum = 0.0
+        self._crowding_sq_sum = 0.0
+        self._bcl_steps = 0
+
+        return result
+
+
+class FeatureSnapshotRecorder:
+    """Captures encoder weight snapshots at regular intervals during training.
+
+    Stores raw weight tensors (CPU, cloned) indexed by step number, with
+    optional event tags (e.g. 'replacement', 'epoch'). The API layer
+    renders these to images on demand.
+
+    Usage:
+        recorder = FeatureSnapshotRecorder(
+            encoder_layer=model.encoder[0],
+            every_n_steps=500,
+            image_shape=(28, 28),
+        )
+        # Inside training_metrics_fn:
+        recorder.maybe_snapshot(step)
+        # On replacement events:
+        recorder.snapshot(step, event='replacement')
+    """
+
+    def __init__(
+        self,
+        encoder_layer: torch.nn.Module,
+        every_n_steps: int = 500,
+        image_shape: tuple[int, ...] = (28, 28),
+    ):
+        self.encoder_layer = encoder_layer
+        self.every_n_steps = every_n_steps
+        self.image_shape = image_shape
+        # List of (step, event_tag, weight_tensor[D, in_dim])
+        self.snapshots: list[tuple[int, str, torch.Tensor]] = []
+
+    def maybe_snapshot(self, step: int) -> bool:
+        """Take a snapshot if step is a multiple of every_n_steps.
+        Returns True if a snapshot was taken."""
+        if step % self.every_n_steps == 0:
+            self.snapshot(step, event="periodic")
+            return True
+        return False
+
+    def snapshot(self, step: int, event: str = "") -> None:
+        """Capture current encoder weights."""
+        with torch.no_grad():
+            weights = self.encoder_layer.weight.detach().cpu().clone()
+        self.snapshots.append((step, event, weights))
+
+    def get_steps(self) -> list[dict]:
+        """Return list of {step, event} for all snapshots."""
+        return [{"step": s, "event": e} for s, e, _ in self.snapshots]
+
+    def get_feature_images(self, step: int) -> Optional[torch.Tensor]:
+        """Get weight tensor [D, H, W] for a specific step."""
+        for s, _, w in self.snapshots:
+            if s == step:
+                D = w.size(0)
+                return w.view(D, *self.image_shape)
+        return None
+
+    def get_feature_timeline(self, feature_idx: int) -> list[dict]:
+        """Get all snapshots for a single feature as [{step, event, weights}]."""
+        H, W = self.image_shape
+        result = []
+        for s, e, w in self.snapshots:
+            result.append({
+                "step": s,
+                "event": e,
+                "weights": w[feature_idx].view(H, W),
+            })
+        return result
+
+    def num_snapshots(self) -> int:
+        return len(self.snapshots)

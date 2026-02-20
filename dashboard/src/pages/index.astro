@@ -2,6 +2,8 @@
 import Layout from '../layouts/Layout.astro';
 import LossChart from '../components/LossChart.tsx';
 import TrainingMetricsChart from '../components/TrainingMetricsChart.tsx';
+import FeatureSnapshotTimeline from '../components/FeatureSnapshotTimeline.tsx';
+import BCLDiagnostics from '../components/BCLDiagnostics.tsx';
 ---
 
 <Layout title="ACC Dashboard">
@@ -154,6 +156,12 @@ import TrainingMetricsChart from '../components/TrainingMetricsChart.tsx';
         </div>
         <div class="empty">Load features to visualize encoder weight patterns across checkpoints</div>
       </div>
+
+      <!-- Feature Evolution Timeline (weight snapshots over training) -->
+      <FeatureSnapshotTimeline client:load />
+
+      <!-- BCL Diagnostics (signal scatter, win rate heatmap, dead diversity) -->
+      <BCLDiagnostics client:load />
 
       <!-- M-UI-5: Add Task -->
       <div class="panel" id="add-task-panel">

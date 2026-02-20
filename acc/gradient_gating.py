@@ -211,11 +211,15 @@ class NeighborhoodConfig:
         gate_strength: Interpolation between ungated (0.0) and fully gated (1.0).
         temperature: Sigmoid sharpness for margin-based competition.
             Higher = sharper winner/loser distinction.
+        floor: Minimum gradient scale for losing features (0.0 = full gating,
+            0.1 = losers keep 10% gradient). Prevents total gradient starvation
+            so losers can still slowly differentiate.
     """
     neighborhood_k: int = 8
     recompute_every: int = 50
     gate_strength: float = 1.0
     temperature: float = 5.0
+    floor: float = 0.1
 
 
 class NeighborhoodGating:
@@ -325,6 +329,11 @@ class NeighborhoodGating:
                 max_neighbor = neighbor_strengths.max(dim=2).values  # [B, D]
                 margin = strength - max_neighbor  # [B, D], positive = winning
                 soft_wins = torch.sigmoid(margin * cfg.temperature)  # [B, D]
+
+                # Dissimilarity floor: losers keep at least floor fraction of
+                # gradient. Prevents total starvation so they can differentiate.
+                if cfg.floor > 0:
+                    soft_wins = cfg.floor + (1.0 - cfg.floor) * soft_wins
 
                 # Store for metrics
                 self.last_gate_masks[name] = soft_wins.detach().mean(dim=0).cpu()  # [D]
@@ -617,12 +626,225 @@ class ResidualPCAReplacer:
                     easq[feature_idx] = 0
 
 
+@dataclass
+class BCLConfig:
+    """Configuration for Bidirectional Competitive Learning.
+
+    Args:
+        neighborhood_k: Number of nearest neighbors per feature (weight space).
+        temperature: Sigmoid sharpness for margin competition. Higher = sharper.
+        som_lr: SOM learning rate for loser weight updates.
+        novelty_clamp: Maximum novelty multiplier (caps influence of rare images).
+        recompute_every: Steps between neighborhood recomputation.
+    """
+    neighborhood_k: int = 8
+    temperature: float = 5.0
+    som_lr: float = 0.005
+    novelty_clamp: float = 3.0
+    recompute_every: int = 50
+
+
+class BCL:
+    """Bidirectional Competitive Learning.
+
+    Attaches to an nn.Linear layer. A single forward hook computes local
+    competition (sigmoid margin) and novelty modulation, then registers a
+    backward hook that does BOTH gradient masking (for winners) AND SOM
+    weight update (for losers) in one location.
+
+    Winners: gradient masked by rank_score * novelty.
+    Losers: weight pulled toward raw inputs, weighted by
+            (1 - rank_score) * in_neighborhood * novelty.
+
+    The backward hook fires AFTER gradients are computed from the original
+    forward-pass weights. Modifying module.weight inside it is safe — it
+    only affects the NEXT forward pass. One hook, one location, no bifurcation.
+
+    Usage:
+        bcl = BCL(model.encoder[0], BCLConfig(som_lr=0.005))
+        # train normally — no apply_som() needed
+        bcl.remove()
+    """
+
+    def __init__(self, module: nn.Module, config: BCLConfig):
+        self.module = module
+        self.config = config
+        self._step = 0
+        self._neighbors: Optional[torch.Tensor] = None  # [D, k]
+        self._last_metrics: Optional[dict[str, torch.Tensor]] = None
+        self._handle = module.register_forward_hook(self._forward_hook)
+
+    def _compute_neighborhoods(self) -> None:
+        """Recompute k-nearest neighbors in weight space."""
+        W = self.module.weight.detach()
+        W_flat = W.view(W.size(0), -1)
+        W_norm = torch.nn.functional.normalize(W_flat, dim=1)
+        sim = W_norm @ W_norm.T
+        sim.fill_diagonal_(-float('inf'))
+        k = min(self.config.neighborhood_k, sim.size(0) - 1)
+        self._neighbors = sim.topk(k, dim=1).indices
+
+    def _forward_hook(self, module: nn.Module, input: tuple, output: torch.Tensor):
+        if not output.requires_grad:
+            return
+
+        layer_input = input[0].detach()  # [B, in_features]
+        act = output.detach()            # [B, D]
+
+        if act.dim() == 2:
+            strength = act.abs()  # [B, D]
+        elif act.dim() == 4:
+            strength = act.abs().mean(dim=(2, 3))  # [B, D]
+            layer_input = layer_input.view(layer_input.size(0), -1)
+        else:
+            return
+
+        B, D = strength.shape
+        cfg = self.config
+
+        # --- Neighborhoods ---
+        if self._neighbors is None or self._step % cfg.recompute_every == 0:
+            self._compute_neighborhoods()
+        self._step += 1
+        neighbors = self._neighbors  # [D, k]
+
+        # --- Local competition ---
+        neighbors_exp = neighbors.unsqueeze(0).expand(B, -1, -1)  # [B, D, k]
+        neighbor_strengths = torch.gather(
+            strength.unsqueeze(1).expand(-1, D, -1),
+            dim=2, index=neighbors_exp,
+        )  # [B, D, k]
+        max_neighbor = neighbor_strengths.max(dim=2).values  # [B, D]
+        margin = strength - max_neighbor  # [B, D]
+        rank_score = torch.sigmoid(margin * cfg.temperature)  # [B, D]
+
+        # --- Image novelty ---
+        image_crowding = rank_score.sum(dim=1)  # [B]
+        novelty = 1.0 / (image_crowding + 1e-8)  # [B]
+        novelty = novelty / (novelty.mean() + 1e-8)  # normalize mean=1
+        novelty = novelty.clamp(max=cfg.novelty_clamp)  # [B]
+
+        # --- Winner gradient mask ---
+        grad_mask = rank_score * novelty.unsqueeze(1)  # [B, D]
+
+        # --- Loser SOM targets ---
+        winners_per_image = rank_score.argmax(dim=1)  # [B]
+        winner_nbrs = neighbors[winners_per_image]  # [B, k]
+        in_nbr = torch.zeros(B, D, device=act.device)
+        in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
+
+        som_weight = (1.0 - rank_score) * in_nbr * novelty.unsqueeze(1)  # [B, D]
+        som_norm = som_weight.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
+        som_pull = som_weight / som_norm  # [B, D]
+        som_targets = som_pull.T @ layer_input  # [D, in_features]
+
+        # --- Store metrics for this step ---
+        self._last_metrics = {
+            'rank_score': rank_score.detach(),   # [B, D]
+            'novelty': novelty.detach(),         # [B]
+            'grad_mask': grad_mask.detach(),     # [B, D]
+            'som_weight': som_weight.detach(),   # [B, D]
+            'strength': strength.detach(),       # [B, D]
+            'in_nbr': in_nbr.detach(),           # [B, D]
+        }
+
+        # --- Register backward hook: gradient mask + SOM update ---
+        # Capture everything by value for the closure
+        _mask = grad_mask.detach()
+        _som_targets = som_targets.detach()
+        _som_lr = cfg.som_lr
+        _module = module
+
+        def backward_hook(grad: torch.Tensor) -> torch.Tensor:
+            # SOM update for losers (safe: grad already computed from unmodified weights)
+            with torch.no_grad():
+                _module.weight += _som_lr * (_som_targets - _module.weight)
+            # Gradient mask for winners
+            return grad * _mask
+
+        output.register_hook(backward_hook)
+
+    def get_step_metrics(self) -> Optional[dict]:
+        """Per-step metrics from last forward pass. Returns None if unavailable."""
+        if self._last_metrics is None:
+            return None
+
+        m = self._last_metrics
+        rs = m['rank_score']     # [B, D]
+        gm = m['grad_mask']      # [B, D]
+        sw = m['som_weight']     # [B, D]
+        st = m['strength']       # [B, D]
+        nov = m['novelty']       # [B]
+
+        win_rate = rs.mean(dim=0)              # [D]
+        grad_magnitude = gm.sum(dim=0)         # [D]
+        som_magnitude = sw.sum(dim=0)          # [D]
+        mean_activation = st.mean(dim=0)       # [D]
+
+        return {
+            'win_rate': win_rate,               # [D]
+            'grad_magnitude': grad_magnitude,   # [D]
+            'som_magnitude': som_magnitude,     # [D]
+            'mean_activation': mean_activation, # [D]
+            'mean_novelty': nov.mean().item(),
+            'novelty_std': nov.std().item(),
+            'mean_crowding': rs.sum(dim=1).mean().item(),
+            'crowding_std': rs.sum(dim=1).std().item(),
+        }
+
+    def remove(self) -> None:
+        """Remove all hooks. Call when done with BCL training."""
+        self._handle.remove()
+        self._neighbors = None
+        self._last_metrics = None
+
+    def describe(self) -> dict:
+        """Return BCL configuration as serializable dict."""
+        return {
+            "mechanism": "bcl",
+            "neighborhood_k": self.config.neighborhood_k,
+            "temperature": self.config.temperature,
+            "som_lr": self.config.som_lr,
+            "novelty_clamp": self.config.novelty_clamp,
+            "recompute_every": self.config.recompute_every,
+        }
+
+
+def attach_bcl(
+    model: nn.Module,
+    layer_name: str,
+    config: Optional[BCLConfig] = None,
+) -> BCL:
+    """Convenience: attach BCL to a named module.
+
+    Args:
+        model: The model containing the target layer.
+        layer_name: Dot-separated module name (e.g. "encoder.0").
+        config: BCL configuration. Uses defaults if None.
+
+    Returns:
+        BCL instance. Call .remove() when done.
+    """
+    if config is None:
+        config = BCLConfig()
+
+    named_modules = dict(model.named_modules())
+    if layer_name not in named_modules:
+        available = [n for n, _ in model.named_modules() if n]
+        raise ValueError(
+            f"Layer '{layer_name}' not found in model. Available: {available}"
+        )
+    module = named_modules[layer_name]
+    return BCL(module, config)
+
+
 def attach_neighborhood_gating(
     model: nn.Module,
     layer_configs: dict[str, dict],
     neighborhood_k: int = 8,
     recompute_every: int = 50,
     temperature: float = 1.0,
+    floor: float = 0.1,
     metrics: Optional["TrainingMetricsAccumulator"] = None,
 ) -> NeighborhoodGating:
     """Convenience: attach neighborhood-based gating to named modules.
@@ -630,10 +852,12 @@ def attach_neighborhood_gating(
     Args:
         model: The model to attach gating to.
         layer_configs: Dict mapping module name to config overrides.
-            Keys: "neighborhood_k", "recompute_every", "gate_strength", "temperature".
+            Keys: "neighborhood_k", "recompute_every", "gate_strength",
+            "temperature", "floor".
         neighborhood_k: Default number of neighbors per feature.
         recompute_every: Default steps between neighborhood recomputation.
         temperature: Default softmax temperature for local competition.
+        floor: Default minimum gradient scale for losers (0.1 = 10%).
         metrics: Optional training-time metrics accumulator.
 
     Returns:
@@ -655,6 +879,7 @@ def attach_neighborhood_gating(
             recompute_every=overrides.get("recompute_every", recompute_every),
             gate_strength=overrides.get("gate_strength", 1.0),
             temperature=overrides.get("temperature", temperature),
+            floor=overrides.get("floor", floor),
         )
         gating.attach(module, layer_name, config)
 

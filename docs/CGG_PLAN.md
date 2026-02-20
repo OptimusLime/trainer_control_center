@@ -210,6 +210,182 @@ The recipe creates both conditions (standard + gated), trains both, evaluates bo
 
 ---
 
+### M-CGG-2.9: Bidirectional Competitive Learning (BCL)
+
+**Functionality:** I can run a recipe with 6 conditions (control, nbr-k8, pca-k8, bcl-lr005, bcl-lr01, bcl-lr001) and see whether BCL solves the dead feature problem without global gradient floor or PCA hackery. The dashboard shows the per-feature signal scatter (grad vs SOM magnitude — the single most important diagnostic), unreachable feature count, win rate heatmap, and feature velocity alongside existing gating metrics. I can watch feature weight snapshots evolve and see losers actively migrating toward useful input regions.
+
+**Foundation:** `BCL` class — a single-hook mechanism that attaches to any `nn.Linear` layer. One forward hook computes competition and SOM targets, then registers ONE backward hook that does both gradient masking AND SOM weight update in a single location. No `apply_som()`, no `post_step_fn`, no bifurcation. `get_step_metrics()` returns per-step [D]-tensor diagnostics. This is a **library abstraction** — one class, two knobs (`temperature`, `som_lr`), no external dependencies. `BCLHealthTracker(FeatureHealthTracker)` in `training_metrics.py` accumulates the per-step metrics for dashboard streaming and epoch-level analysis.
+
+**Why:** Our experiments showed:
+1. Neighborhood gating produces sharp winners that beat control on reconstruction (pca-k8 achieved L1=0.049, 23% better than control).
+2. But ~50% of features die because losers get no useful signal.
+3. The 10% gradient floor works numerically but is a corrupting diffuse signal — it's just softened SGD.
+4. PCA replacement creates alien blob features that freeze in place.
+
+The core problem: losers have no LOCAL signal telling them where to go. BCL gives them one — the raw input that their neighbor's winner claimed, weighted by how NOVEL that image is. This creates two complementary pressures:
+- **Winners freeze** via novelty attenuation (their territory becomes crowded, gradient signal drops).
+- **Losers explore** via novelty amplification (novel images = uncovered territory, SOM signal is strongest there).
+
+No global SGD. No gradient floor. No PCA. No explorer routing. One class. Two knobs.
+
+**The Algorithm (BCL class):**
+
+The BCL class attaches a single forward hook to an `nn.Linear` layer. The hook:
+
+1. **Captures** `input[0].detach()` (the layer's input, for SOM targets) and `output.detach()` (activations, for competition).
+2. **Recomputes neighborhoods** every `recompute_every` steps: cosine similarity of weight rows, top-k neighbors per feature.
+3. **Local competition**: for each (image, feature), computes `margin = my_strength - max_neighbor_strength`, then `rank_score = sigmoid(margin * temperature)`. This is the same sigmoid margin as `NeighborhoodGating`.
+4. **Image novelty**: `crowding = rank_score.sum(dim=1)` per image (how many features claim this image). `novelty = normalize(1/crowding)`, clamped to `novelty_clamp` (default 3.0). Novel images are uncrowded — few features claim them.
+5. **Backward hook** (single hook does both gradient masking AND SOM update):
+   - Computes `grad_mask = rank_score * novelty` for winners.
+   - Computes SOM targets for losers: identify which features are in the per-image winner's neighborhood. SOM weight = `(1 - rank_score) * in_neighborhood * novelty`. Compute weighted average of inputs: `som_targets = normalized_som_weight.T @ layer_input` → [D, in_features].
+   - Registers ONE backward hook on the output tensor that does both:
+     ```python
+     def _backward_hook(grad, mask, module, som_targets, som_lr):
+         # SOM update for losers (safe: gradient already computed from unmodified weights)
+         with torch.no_grad():
+             module.weight += som_lr * (som_targets - module.weight)
+         # Gradient mask for winners (returned to autograd)
+         return grad * mask
+     ```
+   - This is safe because the backward hook fires AFTER the gradient is computed from the original (unmodified) forward-pass weights. Modifying `module.weight` here does not corrupt the gradient — it only affects the NEXT forward pass. One hook, one location, no bifurcation.
+6. **`get_step_metrics()`**: returns per-step diagnostics from the last forward pass: `win_rate[D]`, `grad_magnitude[D]`, `som_magnitude[D]`, `mean_activation[D]`, `internal_diversity[D]`, `mean_novelty`, `novelty_std`, `mean_crowding`, `crowding_std`.
+
+**Parameters:**
+- `neighborhood_k`: int = 8 (number of weight-space neighbors per feature)
+- `temperature`: float = 5.0 (sigmoid sharpness for margin competition)
+- `som_lr`: float = 0.005 (SOM learning rate for losers)
+- `novelty_clamp`: float = 3.0 (max novelty multiplier)
+- `recompute_every`: int = 50 (steps between neighborhood recomputation)
+
+**Training loop integration:**
+```python
+bcl = BCL(model.encoder[0], neighborhood_k=8, som_lr=0.005)
+for step, batch in enumerate(loader):
+    out = model(batch)
+    loss = F.mse_loss(out, batch)
+    optimizer.zero_grad()
+    loss.backward()        # backward hook does BOTH: gradient masking + SOM weight update
+    optimizer.step()       # Adam updates (winners effectively)
+    # No apply_som() needed — SOM update already happened in the backward hook
+```
+
+**Changes from current codebase:**
+
+1. **New class** `BCL` in `acc/gradient_gating.py`:
+   - Self-contained: one `__init__`, one forward hook (which registers a backward hook each pass), one `get_step_metrics()`, one `remove()`. No `apply_som()` — SOM update happens inside the backward hook alongside gradient masking.
+   - Does NOT inherit from `NeighborhoodGating`. Independent implementation. Shares the neighborhood computation pattern but the hook logic is fundamentally different (novelty modulation, in-hook SOM update, metrics capture).
+   - `BCLConfig` dataclass for parameters: `neighborhood_k`, `temperature`, `som_lr`, `novelty_clamp`, `recompute_every`.
+   - `attach_bcl(model, layer_configs, ...)` convenience function parallel to `attach_neighborhood_gating()`.
+
+2. **New class** `BCLHealthTracker(FeatureHealthTracker)` in `acc/training_metrics.py`:
+   - Accepts per-step metrics from `BCL.get_step_metrics()` via a new `record_bcl_step(metrics_dict)` method.
+   - Accumulates per-epoch:
+     - `grad_magnitude_sum[D]`, `som_magnitude_sum[D]` — for the signal scatter plot.
+     - `unreachable_count` — features where both grad and SOM magnitude are below threshold.
+     - `win_rate_history[D, epochs]` — for the win rate heatmap.
+     - `feature_velocity[D]` — weight change between epoch start/end snapshots.
+     - `internal_diversity_mean` — mean neighborhood diversity.
+   - Overrides `summarize()` to inject BCL metrics into the dashboard stream: `som_magnitude_mean`, `grad_magnitude_mean`, `unreachable_count`, `mean_novelty`, `mean_crowding`, `internal_diversity`.
+   - Overrides `end_epoch()` to snapshot epoch-level signal scatter data and velocity.
+
+3. **Recipe update**: `gradient_gating_l0.py`:
+   - New helper `_run_bcl_condition(ctx, tag, mnist, health, som_lr)`:
+     - Creates `BCL` instance on encoder layer.
+     - BCL's backward hook handles both gradient masking AND SOM update — no `apply_som()` call needed, no `post_step_fn` on Trainer. The `training_metrics_fn` calls `bcl.get_step_metrics()` → feeds to `BCLHealthTracker.record_bcl_step()`, then returns metrics summary when due.
+     - Snapshot recorder wired in (reuses existing `FeatureSnapshotRecorder`).
+     - Epoch boundary logic (health tracking) same pattern as `_run_gated_condition`.
+   - **No Trainer changes needed.** SOM update happens inside the backward hook (fires after gradients are computed from unmodified weights, so weight modification is safe). One hook, one location, no bifurcation. The existing `training_metrics_fn` callback is sufficient for metrics collection.
+   - 3 new conditions:
+     - `bcl-lr005`: BCL k=8, som_lr=0.005
+     - `bcl-lr01`: BCL k=8, som_lr=0.01
+     - `bcl-lr001`: BCL k=8, som_lr=0.001
+   - Trim old conditions to 3 (control, nbr-k8, pca-k8) for comparison. Total: 6 conditions.
+
+4. **Dashboard**:
+   - `TrainingMetrics` type extended with: `som_magnitude_mean`, `grad_magnitude_mean`, `unreachable_count`, `mean_novelty`, `mean_crowding`, `internal_diversity`.
+   - `TrainingMetricsChart` gains new datasets: unreachable count (red, y2 axis), SOM magnitude (green dashed, y2 axis).
+   - **New panel: Signal Scatter** — fetched on demand, shows grad_magnitude[D] vs som_magnitude[D] as a scatter plot at a selected step. Color = win_rate. This is the single most important BCL diagnostic.
+   - Feature snapshot timeline already available from prior work.
+
+**Implements:**
+- `BCLConfig` dataclass in `acc/gradient_gating.py`
+- `BCL` class in `acc/gradient_gating.py` (forward hook + backward hook for both gradient masking and SOM update)
+- `attach_bcl()` helper function in `acc/gradient_gating.py`
+- `BCLHealthTracker(FeatureHealthTracker)` in `acc/training_metrics.py`
+- `_run_bcl_condition()` helper in `acc/recipes/gradient_gating_l0.py`
+- 3 new conditions in `GradientGatingL0.run()`
+- Dashboard type + chart extensions + signal scatter panel
+
+**Metrics Tiers:**
+
+Tier 1 — Must-have (validates whether BCL works at all):
+
+| # | Metric | Source | Visualization | Target |
+|---|--------|--------|---------------|--------|
+| 1 | Reconstruction L1 + PSNR | Loss during training | Line plot (existing) | L1 < 0.050, PSNR > 14.5 |
+| 2 | Per-feature signal scatter | `get_step_metrics()` grad_magnitude vs som_magnitude | Scatter plot, color=win_rate, at steps [500, 5000, 15000, 25000] | Two populations: top-left (winners) + bottom-right (losers). No dead zone (low grad, low SOM). |
+| 3 | Unreachable feature count | Features where grad < threshold AND SOM < threshold | Line plot over steps | < 5 by step 10000 |
+| 4 | Weight visualization 8x8 | Encoder weights reshaped to 28x28 | Feature grid with status-colored borders | > 50 features with recognizable structure |
+
+Tier 2 — Important (validates dynamics are healthy):
+
+| # | Metric | Source | Visualization |
+|---|--------|--------|---------------|
+| 5 | Win rate heatmap | `win_rate[D]` every 100 steps | [D x steps] heatmap — bright bands = stable winners, brightening = recovering losers |
+| 6 | Neighborhood internal diversity | `internal_diversity[D]` | Two lines: mean diversity of top-20 vs bottom-20 features |
+| 7 | Image crowding distribution | `mean_crowding`, `crowding_std` | Line plot over steps |
+| 8 | Feature velocity | Weight snapshots, per-feature L2 distance | [D x steps] heatmap — all features should be nonzero |
+
+Tier 3 — Nice-to-have (deep diagnostics):
+
+| # | Metric | Tests |
+|---|--------|-------|
+| 9 | SOM target coherence within dead neighborhoods | H3: dead neighborhoods translate as blob? |
+| 10 | Gradient norm vs SOM displacement ratio | H5: SOM dominates for dead features? |
+| 11 | Win source entropy (per-feature, by digit class) | Specialist vs generic? |
+
+**Implementation Scope for M-CGG-2.9:** Tier 1 (all 4) + Tier 2 items 5 and 8 (win rate heatmap and feature velocity, both already partially supported by existing `FeatureHealthTracker` and `FeatureSnapshotRecorder`). Tier 2 items 6-7 and Tier 3 are deferred to analysis after first run — we capture the raw data (via `get_step_metrics()`) but don't build dashboard panels until we know what we need.
+
+**Hypotheses to test:**
+
+- **H1**: Winners specialize and freeze via novelty attenuation. Evidence: win rate heatmap shows stable bright bands; feature velocity for top-20 decreases.
+- **H2**: Near-winner losers find sub-niches via novelty-weighted SOM. Evidence: features brightening in win rate heatmap; signal scatter shows migration from SOM-dominant to gradient-dominant.
+- **H3** (known risk): Dead neighborhoods translate coherently as a blob without dispersing. Evidence: all dead features move same direction at same speed. If confirmed, need per-feature noise injection in next iteration.
+- **H6** (optimistic): Per-image novelty creates enough asymmetry to break dead neighborhoods over time. Evidence: internal diversity of dead neighborhoods INCREASES over training.
+
+**Verification:**
+- Run `gradient_gating_l0` recipe from dashboard
+- All 6 conditions complete without error (control, nbr-k8, pca-k8, bcl-lr005, bcl-lr01, bcl-lr001)
+- BCL conditions log per-step metrics (grad_magnitude, som_magnitude, unreachable count)
+- Dashboard gating metrics chart shows unreachable_count and som_magnitude_mean
+- Signal scatter panel shows two populations (winners top-left, losers bottom-right) — no dead zone
+- Feature snapshot timeline shows loser features visibly moving over time (not frozen)
+- At least one BCL condition beats pca-k8 on L1 AND has < 5 unreachable features
+- If ALL BCL conditions fail, document which hypothesis failed and why
+
+**Implementation order (subtasks):**
+
+1. `BCLConfig` dataclass and `BCL` class in `acc/gradient_gating.py` — the core mechanism (forward hook computes competition + SOM targets, backward hook applies both gradient mask + SOM weight update)
+2. `attach_bcl()` convenience function
+3. `BCLHealthTracker(FeatureHealthTracker)` in `acc/training_metrics.py` — accumulates `get_step_metrics()` output
+4. `_run_bcl_condition()` in recipe — wires BCL hook + health tracker + snapshot recorder
+5. Wire 3 BCL conditions into `GradientGatingL0.run()`, trim to 6 total
+6. Dashboard: `TrainingMetrics` type extensions + chart datasets
+7. Dashboard: Signal scatter panel (grad vs SOM per feature)
+8. Run recipe, verify all 6 conditions complete, analyze results against hypotheses
+
+### M-CGG-2.9 Cleanup Audit
+- [ ] SOM is applied inside the backward hook (BEFORE optimizer.step()) — does Adam then overwrite the SOM update? Answer: partially. Adam applies `lr * m_hat / (sqrt(v_hat) + eps)` to the SOM-modified weight. For losers with near-zero gradient, Adam's update is near-zero, so SOM dominates. For winners with strong gradient, Adam dominates. This is the desired behavior. But watch for: if Adam's momentum from prior steps is large for a recently-SOM-moved feature, the next Adam step might fight the SOM displacement. Monitor feature velocity for jitter at transition boundaries.
+- [ ] `novelty_clamp=3.0` — is this the right value? Too low = no asymmetry. Too high = single novel image dominates.
+- [ ] Should BCL reset Adam state for features that received large SOM displacement? (Since SOM happens in the backward hook before optimizer.step(), Adam sees the SOM-modified weight. If a loser was moved far by SOM, Adam's momentum/variance estimates are stale for the new position. Consider resetting Adam state for features where SOM displacement exceeds a threshold.)
+- [ ] Memory: `input[0].detach()` capture is [B, 784] per forward pass = 100KB at B=128. Negligible.
+- [ ] Decoder BCL: Not included in M-CGG-2.9. The encoder BCL should be sufficient — decoder features are the transpose. If encoder features diversify, decoder should follow via gradient. Add decoder BCL as a follow-up experiment if encoder-only BCL works.
+- [ ] The `get_step_metrics()` internal_diversity computation does a `torch.bmm` of [D, k, in_features] — for D=64, k=8, in_features=784 this is a [64, 8, 784] tensor. ~400KB, acceptable. But for larger models this may need to be sampled or deferred.
+- [ ] Should BCL track per-digit win source for hypothesis H1/H11? This requires access to labels during training, which we don't currently have in the metrics path. Defer to Tier 3 / M-CGG-2.5c.
+
+---
+
 ### M-CGG-2.5c: Enriched Eval Metrics + Feature Utilization Map
 
 **Functionality:** I can see Hoyer sparsity, top-k concentration, per-feature selectivity, and the feature-utilization heatmap in the dashboard for any checkpoint. The eval panel becomes a comprehensive specialization report — answering not just "is it specialized?" but "how is it specialized?" and "what did each feature learn?"
@@ -239,18 +415,20 @@ The recipe creates both conditions (standard + gated), trains both, evaluates bo
 
 ---
 
-### M-CGG-2.5/2.75 Dependency and Relationship to Existing Plan
+### M-CGG-2.5/2.75/2.9 Dependency and Relationship to Existing Plan
 
 ```
 M-CGG-1: Linear AE + Gating mechanism + Recipe ✅
     ↓
 M-CGG-2: Specialization metrics (weight diversity, sparsity, rank) ✅
     ↓
-M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV, dashboard panel)
+M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV, dashboard panel) ✅
     ↓
-M-CGG-2.5b: Neighborhood gating mechanism (the fix for mode collapse)
+M-CGG-2.5b: Neighborhood gating mechanism (the fix for mode collapse) ✅
     ↓
-M-CGG-2.75: Residual PCA replacement (dead feature recovery)
+M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
+    ↓
+M-CGG-2.9: Bidirectional Competitive Learning (BCL) — local SOM signal for losers
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -374,9 +552,13 @@ M-CGG-1: Linear AE + Gating mechanism + Recipe ✅
     ↓
 M-CGG-2: Specialization metrics (weight diversity, sparsity, rank) ✅
     ↓
-M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV)
+M-CGG-2.5a: Training-time metrics infrastructure (entropy, gradient CV) ✅
     ↓
-M-CGG-2.5b: Neighborhood gating mechanism (fix for mode collapse)
+M-CGG-2.5b: Neighborhood gating mechanism (fix for mode collapse) ✅
+    ↓
+M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
+    ↓
+M-CGG-2.9: Bidirectional Competitive Learning (local SOM for losers)
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -389,7 +571,7 @@ M-CGG-5: (Subsumed by 2.5a — reduced to periodic eval snapshots if needed)
 M-CGG-6: Factor-Slot VAE + Gating (conditional on L0-L2 results)
 ```
 
-M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes mode collapse at sharp temperatures. M-CGG-2.5 is the diagnostic + fix cycle: build the instruments (2.5a), build the new mechanism (2.5b), enrich the measurement battery (2.5c). Every subsequent milestone adds one architectural element.
+M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes mode collapse at sharp temperatures. M-CGG-2.5 is the diagnostic + fix cycle: build the instruments (2.5a), build the new mechanism (2.5b), enrich the measurement battery (2.5c). M-CGG-2.75 added dead feature recovery via PCA (works but feels like hackery). M-CGG-2.9 is the key algorithmic pivot: instead of global gradient floor + PCA replacement, give losers a LOCAL signal via SOM-style weight alignment. Every subsequent milestone adds one architectural element.
 
 ## Milestone Status
 
@@ -400,6 +582,7 @@ M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes m
 | M-CGG-2.5a: Training-Time Metrics | **DONE** | Watch entropy + gradient CV evolve in real-time during training |
 | M-CGG-2.5b: Neighborhood Gating | **DONE** | Run neighborhood gating, see per-image competition with sigmoid margins |
 | M-CGG-2.75: Residual PCA Replacement | **DONE** | Run PCA replacement for dead features, see replacement events + success rate |
+| M-CGG-2.9: Bidirectional Competitive Learning | Not started | Run BCL with SOM-style loser recovery, see feature dynamics + velocity |
 | M-CGG-2.5c: Enriched Eval Metrics | Not started | See Hoyer sparsity, top-k, selectivity, feature utilization heatmap |
 | M-CGG-3: Conv AE + Depth Gating | Not started | Run gating on conv layers with depth-dependent strength |
 | M-CGG-4: Conv VAE + KL | Not started | Test gating compatibility with VAE objective |

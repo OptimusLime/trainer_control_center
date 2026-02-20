@@ -734,6 +734,129 @@ class TrainerAPI:
                 "image_shape": list(spatial),
             }
 
+        @app.get("/eval/features/snapshots")
+        async def eval_features_snapshots(tag: str = "", step: int = -1):
+            """Return feature weight snapshot data for timeline visualization.
+
+            The recipe stores FeatureSnapshotRecorder objects on the API as
+            ``self.snapshot_recorders[tag]``. This endpoint renders them.
+
+            Query params:
+                tag: condition tag (e.g. "pca-k8"). Empty = list available tags.
+                step: specific step to render. -1 = return index of all snapshots.
+
+            Returns (tag empty):
+                {"tags": ["nbr-k8", "pca-k8", ...]}
+
+            Returns (step == -1, tag set):
+                {"tag": "pca-k8", "steps": [{"step": 0, "event": "init"}, ...]}
+
+            Returns (step >= 0, tag set):
+                {"tag": "pca-k8", "step": 500, "event": "periodic",
+                 "n_features": 64, "image_shape": [28, 28],
+                 "features": ["base64...", ...]}
+            """
+            recorders = getattr(self, 'snapshot_recorders', None)
+            if not recorders:
+                return JSONResponse(
+                    {"error": "No snapshot recorders available. Run a gated recipe first."},
+                    status_code=404,
+                )
+
+            # List available tags
+            if not tag:
+                return {"tags": list(recorders.keys())}
+
+            recorder = recorders.get(tag)
+            if recorder is None:
+                return JSONResponse(
+                    {"error": f"No snapshots for tag '{tag}'. Available: {list(recorders.keys())}"},
+                    status_code=404,
+                )
+
+            # Return step index
+            if step < 0:
+                return {"tag": tag, "steps": recorder.get_steps()}
+
+            # Render a specific step's features as base64 PNGs
+            feature_images = recorder.get_feature_images(step)
+            if feature_images is None:
+                return JSONResponse(
+                    {"error": f"No snapshot at step {step} for tag '{tag}'"},
+                    status_code=404,
+                )
+
+            # feature_images is [D, H, W], normalize each to [0,1] and encode
+            features_b64 = []
+            for i in range(feature_images.shape[0]):
+                row = feature_images[i].float()
+                rmin, rmax = row.min(), row.max()
+                if rmax - rmin > 1e-8:
+                    row = (row - rmin) / (rmax - rmin)
+                else:
+                    row = torch.zeros_like(row) + 0.5
+                features_b64.append(_tensor_to_base64(row.unsqueeze(0)))
+
+            return {
+                "tag": tag,
+                "step": step,
+                "event": next(
+                    (e for s, e, _ in recorder.snapshots if s == step), ""
+                ),
+                "n_features": feature_images.shape[0],
+                "image_shape": list(recorder.image_shape),
+                "features": features_b64,
+            }
+
+        @app.get("/eval/bcl/diagnostics")
+        async def bcl_diagnostics(tag: str = "", mode: str = "scatter"):
+            """Return BCL diagnostic data for dashboard panels.
+
+            Query params:
+                tag: condition tag (e.g. "bcl-med"). Empty = list available tags.
+                mode: "scatter" | "winrate" | "diversity"
+
+            Returns (tag empty):
+                {"tags": ["bcl-slow", "bcl-med"]}
+
+            Returns (mode=scatter):
+                {"tag": "bcl-med", "entries": [{step, grad_magnitude[D], som_magnitude[D], win_rate[D]}, ...]}
+
+            Returns (mode=winrate):
+                {"tag": "bcl-med", "entries": [{step, win_rate[D]}, ...]}
+
+            Returns (mode=diversity):
+                {"tag": "bcl-med", "entries": [{step, mean_similarity}, ...]}
+            """
+            trackers = getattr(self, 'bcl_trackers', None)
+            if not trackers:
+                return JSONResponse(
+                    {"error": "No BCL trackers available. Run a BCL recipe first."},
+                    status_code=404,
+                )
+
+            if not tag:
+                return {"tags": list(trackers.keys())}
+
+            tracker = trackers.get(tag)
+            if tracker is None:
+                return JSONResponse(
+                    {"error": f"No BCL data for tag '{tag}'. Available: {list(trackers.keys())}"},
+                    status_code=404,
+                )
+
+            if mode == "scatter":
+                return {"tag": tag, "entries": tracker.signal_scatter_log}
+            elif mode == "winrate":
+                return {"tag": tag, "entries": tracker.win_rate_log}
+            elif mode == "diversity":
+                return {"tag": tag, "entries": tracker.dead_diversity_log}
+            else:
+                return JSONResponse(
+                    {"error": f"Unknown mode '{mode}'. Use scatter/winrate/diversity."},
+                    status_code=400,
+                )
+
         @app.post("/eval/reconstructions")
         async def eval_reconstructions(request: Request):
             """Encode + decode N images, return originals and reconstructions side-by-side."""

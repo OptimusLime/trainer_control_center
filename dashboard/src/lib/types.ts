@@ -55,6 +55,50 @@ export interface TrainingMetrics {
   gini?: number;
   top5_share?: number;
   replacement_count?: number;
+  // BCL-specific metrics
+  grad_magnitude_mean?: number;
+  som_magnitude_mean?: number;
+  unreachable_count?: number;
+  mean_novelty?: number;
+  mean_crowding?: number;
+}
+
+// --- BCL Signal Scatter ---
+
+export interface BCLScatterEntry {
+  step: number;
+  grad_magnitude: number[];  // [D]
+  som_magnitude: number[];   // [D]
+  win_rate: number[];        // [D]
+}
+
+export interface BCLScatterResponse {
+  tag: string;
+  entries: BCLScatterEntry[];
+}
+
+// --- BCL Win Rate Heatmap ---
+
+export interface BCLWinRateEntry {
+  step: number;
+  win_rate: number[];  // [D]
+}
+
+export interface BCLWinRateResponse {
+  tag: string;
+  entries: BCLWinRateEntry[];
+}
+
+// --- BCL Dead Diversity ---
+
+export interface BCLDeadDiversityEntry {
+  step: number;
+  mean_similarity: number;
+}
+
+export interface BCLDeadDiversityResponse {
+  tag: string;
+  entries: BCLDeadDiversityEntry[];
 }
 
 export interface LossEntry {
@@ -261,4 +305,29 @@ export interface FeatureSiblingsResponse {
   current_id: string | null;
   n_features: number;
   image_shape: number[];
+}
+
+// --- Feature Weight Snapshots ---
+
+export interface SnapshotStepEntry {
+  step: number;
+  event: string;
+}
+
+export interface SnapshotTagsResponse {
+  tags: string[];
+}
+
+export interface SnapshotIndexResponse {
+  tag: string;
+  steps: SnapshotStepEntry[];
+}
+
+export interface SnapshotFrameResponse {
+  tag: string;
+  step: number;
+  event: string;
+  n_features: number;
+  image_shape: number[];
+  features: string[];  // base64 PNG per feature
 }
