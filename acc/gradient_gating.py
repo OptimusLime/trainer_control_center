@@ -727,7 +727,29 @@ class BCL:
         # --- Winner gradient mask ---
         grad_mask = rank_score * novelty.unsqueeze(1)  # [B, D]
 
-        # --- Loser SOM targets ---
+        # --- Step 6: Bully direction per feature ---
+        # For each feature, how much does each neighbor beat it on average?
+        strength_exp = strength.unsqueeze(2).expand_as(neighbor_strengths)  # [B, D, k]
+        beat_margin = (neighbor_strengths - strength_exp).clamp(min=0)     # [B, D, k]
+        beat_mean = beat_margin.mean(dim=0)  # [D, k] — avg margin per neighbor
+
+        beat_weights = beat_mean / (beat_mean.sum(dim=1, keepdim=True) + 1e-8)  # [D, k]
+
+        W = module.weight.detach()  # [D, in_features]
+        neighbor_weights = W[neighbors]  # [D, k, in_features]
+        bully_raw = torch.einsum('dk,dki->di', beat_weights, neighbor_weights)  # [D, in_features]
+        bully_direction = torch.nn.functional.normalize(bully_raw, dim=1)  # [D, in_features]
+
+        # --- Step 7: Adjusted inputs per feature ---
+        # Remove each feature's bully direction from each input image
+        overlap = layer_input @ bully_direction.T  # [B, D]
+        # adjusted_input[b, d, :] = layer_input[b, :] - overlap[b, d] * bully_direction[d, :]
+        adjusted_input = (
+            layer_input.unsqueeze(1)
+            - overlap.unsqueeze(2) * bully_direction.unsqueeze(0)
+        )  # [B, D, in_features]
+
+        # --- Step 8: SOM targets using adjusted inputs ---
         winners_per_image = rank_score.argmax(dim=1)  # [B]
         winner_nbrs = neighbors[winners_per_image]  # [B, k]
         in_nbr = torch.zeros(B, D, device=act.device)
@@ -736,16 +758,19 @@ class BCL:
         som_weight = (1.0 - rank_score) * in_nbr * novelty.unsqueeze(1)  # [B, D]
         som_norm = som_weight.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
         som_pull = som_weight / som_norm  # [B, D]
-        som_targets = som_pull.T @ layer_input  # [D, in_features]
+        # Per-feature weighted average of bully-adjusted inputs
+        som_targets = torch.einsum('bd,bdi->di', som_pull, adjusted_input)  # [D, in_features]
 
         # --- Store metrics for this step ---
+        bully_magnitude = bully_raw.norm(dim=1)  # [D] — how dominated each feature is
         self._last_metrics = {
-            'rank_score': rank_score.detach(),   # [B, D]
-            'novelty': novelty.detach(),         # [B]
-            'grad_mask': grad_mask.detach(),     # [B, D]
-            'som_weight': som_weight.detach(),   # [B, D]
-            'strength': strength.detach(),       # [B, D]
-            'in_nbr': in_nbr.detach(),           # [B, D]
+            'rank_score': rank_score.detach(),       # [B, D]
+            'novelty': novelty.detach(),             # [B]
+            'grad_mask': grad_mask.detach(),         # [B, D]
+            'som_weight': som_weight.detach(),       # [B, D]
+            'strength': strength.detach(),           # [B, D]
+            'in_nbr': in_nbr.detach(),               # [B, D]
+            'bully_magnitude': bully_magnitude.detach(),  # [D]
         }
 
         # --- Register backward hook: gradient mask + SOM update ---
@@ -775,6 +800,7 @@ class BCL:
         sw = m['som_weight']     # [B, D]
         st = m['strength']       # [B, D]
         nov = m['novelty']       # [B]
+        bm = m['bully_magnitude']  # [D]
 
         win_rate = rs.mean(dim=0)              # [D]
         grad_magnitude = gm.sum(dim=0)         # [D]
@@ -786,6 +812,7 @@ class BCL:
             'grad_magnitude': grad_magnitude,   # [D]
             'som_magnitude': som_magnitude,     # [D]
             'mean_activation': mean_activation, # [D]
+            'bully_magnitude': bm,             # [D]
             'mean_novelty': nov.mean().item(),
             'novelty_std': nov.std().item(),
             'mean_crowding': rs.sum(dim=1).mean().item(),
