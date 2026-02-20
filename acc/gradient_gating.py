@@ -724,15 +724,37 @@ class BCL:
         novelty = novelty / (novelty.mean() + 1e-8)  # normalize mean=1
         novelty = novelty.clamp(max=cfg.novelty_clamp)  # [B]
 
-        # --- Winner gradient mask ---
-        grad_mask = rank_score * novelty.unsqueeze(1)  # [B, D]
+        # --- Step 5: Feature status + force blending weights ---
+        win_rate = rank_score.mean(dim=0)  # [D]
+        gradient_weight = win_rate                              # [D] — peaks for winners
+        rotation_weight = win_rate * (1 - win_rate) * 4         # [D] — peaks at wr=0.5
+        attraction_weight = 1.0 - win_rate                      # [D] — peaks for dead
 
-        # --- Step 6: Bully direction per feature ---
-        # For each feature, how much does each neighbor beat it on average?
+        # --- Step 6: Force 1 — Gradient (for winners) ---
+        grad_mask = (
+            rank_score * novelty.unsqueeze(1) * gradient_weight.unsqueeze(0)
+        )  # [B, D]
+
+        # --- Shared: in_neighborhood mask ---
+        winners_per_image = rank_score.argmax(dim=1)  # [B]
+        winner_nbrs = neighbors[winners_per_image]  # [B, k]
+        in_nbr = torch.zeros(B, D, device=act.device)
+        in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
+
+        # --- Step 7: Force 2 — Global attraction (for dead features) ---
+        # NO in_neighborhood gate — dead features search globally
+        attract_pull = (
+            (1.0 - rank_score) * novelty.unsqueeze(1) * attraction_weight.unsqueeze(0)
+        )  # [B, D]
+        attract_norm = attract_pull.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
+        attract_pull = attract_pull / attract_norm  # [B, D]
+        attract_target = attract_pull.T @ layer_input  # [D, in_features]
+
+        # --- Step 8: Force 3 — Local rotation (for contenders) ---
+        # Bully direction: weighted blend of neighbors that beat you
         strength_exp = strength.unsqueeze(2).expand_as(neighbor_strengths)  # [B, D, k]
         beat_margin = (neighbor_strengths - strength_exp).clamp(min=0)     # [B, D, k]
-        beat_mean = beat_margin.mean(dim=0)  # [D, k] — avg margin per neighbor
-
+        beat_mean = beat_margin.mean(dim=0)  # [D, k]
         beat_weights = beat_mean / (beat_mean.sum(dim=1, keepdim=True) + 1e-8)  # [D, k]
 
         W = module.weight.detach()  # [D, in_features]
@@ -740,29 +762,36 @@ class BCL:
         bully_raw = torch.einsum('dk,dki->di', beat_weights, neighbor_weights)  # [D, in_features]
         bully_direction = torch.nn.functional.normalize(bully_raw, dim=1)  # [D, in_features]
 
-        # --- Step 7: Adjusted inputs per feature ---
-        # Remove each feature's bully direction from each input image
+        # Project bully direction out of inputs
         overlap = layer_input @ bully_direction.T  # [B, D]
-        # adjusted_input[b, d, :] = layer_input[b, :] - overlap[b, d] * bully_direction[d, :]
-        adjusted_input = (
+        rotated_input = (
             layer_input.unsqueeze(1)
             - overlap.unsqueeze(2) * bully_direction.unsqueeze(0)
         )  # [B, D, in_features]
 
-        # --- Step 8: SOM targets using adjusted inputs ---
-        winners_per_image = rank_score.argmax(dim=1)  # [B]
-        winner_nbrs = neighbors[winners_per_image]  # [B, k]
-        in_nbr = torch.zeros(B, D, device=act.device)
-        in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
+        # Pull toward rotated inputs — LOCAL, needs in_neighborhood
+        rotate_pull = (
+            (1.0 - rank_score) * novelty.unsqueeze(1)
+            * in_nbr * rotation_weight.unsqueeze(0)
+        )  # [B, D]
+        rotate_norm = rotate_pull.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
+        rotate_pull = rotate_pull / rotate_norm  # [B, D]
+        rotate_target = torch.einsum('bd,bdi->di', rotate_pull, rotated_input)  # [D, in_features]
 
-        som_weight = (1.0 - rank_score) * in_nbr * novelty.unsqueeze(1)  # [B, D]
-        som_norm = som_weight.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
-        som_pull = som_weight / som_norm  # [B, D]
-        # Per-feature weighted average of bully-adjusted inputs
-        som_targets = torch.einsum('bd,bdi->di', som_pull, adjusted_input)  # [D, in_features]
+        # --- Step 9: Combine SOM targets ---
+        aw = attraction_weight.unsqueeze(1)  # [D, 1]
+        rw = rotation_weight.unsqueeze(1)    # [D, 1]
+        som_targets = (aw * attract_target + rw * rotate_target) / (aw + rw + 1e-8)
+        # [D, in_features]
+
+        # Total SOM weight for metrics (combine both forces)
+        som_weight = (
+            (1.0 - rank_score) * novelty.unsqueeze(1)
+            * (attraction_weight.unsqueeze(0) + in_nbr * rotation_weight.unsqueeze(0))
+        )  # [B, D]
 
         # --- Store metrics for this step ---
-        bully_magnitude = bully_raw.norm(dim=1)  # [D] — how dominated each feature is
+        bully_magnitude = bully_raw.norm(dim=1)  # [D]
         self._last_metrics = {
             'rank_score': rank_score.detach(),       # [B, D]
             'novelty': novelty.detach(),             # [B]
