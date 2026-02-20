@@ -519,11 +519,125 @@ som_targets = torch.einsum('bd,bdi->di', som_pull, adjusted_input)  # [D, in_fea
 - Signal scatter shows two populations (winners top-left, losers bottom-right) not a blob at origin
 - If bully adjustment helps but doesn't fully solve: next step is per-feature noise or stochastic SOM targets
 
+### M3-0 Results
+
+**Run date:** 2026-02-20. Same 4 conditions as BCL v1.
+
+| Metric | BCL v1 slow | M3-0 slow | BCL v1 med | M3-0 med |
+|--------|-------------|-----------|------------|----------|
+| L1 | 0.115 | **0.087** | 0.109 | **0.098** |
+| weight_cosine_sim | 0.510 | **0.218** | 0.812 | **0.330** |
+| effective_rank | 1.8 | **15.1** | 6.1 | **19.4** |
+| unreachable | 55 | **48** | 48 | **36** |
+| dead cos sim | - | **0.206** | 0.767 | **0.393** |
+| dead (<1% wr) | 62 | 59 | 59 | 59 |
+
+**Verdict: Directionally correct, large improvement, but not solved.** Bully projection breaks the blob (cosine sim halved, effective rank 3-8x better, L1 improved). But 59/64 dead features and 36-48 unreachable means the mechanism still can't reach most features. Two root causes identified:
+
+1. **Attraction is LOCAL (in_neighborhood gate):** Dead features only get SOM signal from images where they're in the winner's neighborhood. If a dead feature is far from all winners in weight space, it gets NO SOM signal — it's unreachable. Need GLOBAL attraction for dead features.
+2. **No force separation:** Winners, contenders, and dead features all get the same blended signal. Dead features need raw attraction toward novel inputs. Contenders need rotation away from bullies. Winners just need gradient. These should be separate forces with smooth blending.
+
+→ Fixed in M3-0.1.
+
 ### M3-0 Cleanup Audit
-- [ ] The `adjusted_input` tensor [B, D, 784] is 25 MB. For conv layers with larger in_features, this needs chunking.
-- [ ] `bully_direction` is recomputed every forward pass. Could cache and recompute every `recompute_every` steps like neighborhoods, but the cost is dominated by the einsum, not the bully computation.
-- [ ] Should `bully_magnitude` (per-feature norm of bully_raw before normalization) be tracked? High bully_magnitude = feature is heavily dominated. Low = feature is competitive. Could be a useful diagnostic.
-- [ ] What if a feature has NO neighbors that beat it (all beat_margin = 0)? Then bully_direction is zero vector, adjusted_input = raw input, SOM target = old behavior. This is correct — winners shouldn't have their SOM targets adjusted.
+- [x] The `adjusted_input` tensor [B, D, 784] is 25 MB. Confirmed fine on GPU.
+- [x] `bully_magnitude` tracked — useful diagnostic showing domination level.
+- [x] Feature with no beating neighbors → bully_direction is zero → adjusted_input = raw input. Correct behavior confirmed.
+
+---
+
+### M3-0.1: Three-Force BCL (Global Attraction + Local Rotation + Gradient)
+
+**Functionality:** BCL separates the SOM signal into three smoothly-blended forces based on per-feature win_rate. Dead features get GLOBAL attraction toward novel inputs (escaping unreachable zones). Contenders get LOCAL rotation away from bullies (finding sub-niches). Winners get gradient from the loss. Each feature's force blend evolves as it transitions between states.
+
+**Why this fixes the remaining problems:**
+
+1. **Global attraction for dead features (Force 2):** M3-0 used `in_neighborhood` to gate ALL SOM signal. Dead features far from winners got nothing — 48 unreachable. By removing the neighborhood gate from attraction, any dead feature can be pulled toward any underserved image in the batch. Novelty weighting naturally pulls them toward images nobody covers.
+
+2. **Force separation:** Instead of one blended SOM target, three forces with smooth weights:
+   - `gradient_weight = win_rate` — winners get gradient
+   - `rotation_weight = win_rate * (1 - win_rate) * 4` — peaks at win_rate=0.5 (contenders), zero at 0 and 1
+   - `attraction_weight = (1 - win_rate)` — strongest for dead features, zero for winners
+
+3. **Contenders get rotation (Force 3):** The bully-projection from M3-0 is preserved but only for contenders. This is the LOCAL force — you need neighbors to rotate away from.
+
+**The Algorithm (replaces Steps 5-9 in `BCL._forward_hook`):**
+
+```
+STEP 5: FEATURE STATUS
+  win_rate[feature] = mean of rank_score across batch
+  gradient_weight[feature] = win_rate
+  rotation_weight[feature] = win_rate * (1 - win_rate) * 4
+  attraction_weight[feature] = (1 - win_rate)
+
+STEP 6: FORCE 1 — GRADIENT (for winners)
+  grad_mask[image, feature] = rank_score * novelty * gradient_weight
+
+STEP 7: FORCE 2 — GLOBAL ATTRACTION (for dead features)
+  # NO in_neighborhood gate. Any dead feature can reach any image.
+  attract_pull[image, feature] = (1 - rank_score) * novelty * attraction_weight
+  attract_pull = normalize per feature
+  attract_target[feature] = weighted avg of RAW X[image]
+
+STEP 8: FORCE 3 — LOCAL ROTATION (for contenders)
+  # Bully direction + projection (same as M3-0)
+  # IN_NEIGHBORHOOD gate preserved — rotation needs local context
+  rotate_pull[image, feature] = (1 - rank_score) * novelty * in_neighborhood * rotation_weight
+  rotate_pull = normalize per feature
+  rotate_target[feature] = weighted avg of bully-adjusted inputs
+
+STEP 9: COMBINE
+  total_som = (attraction_weight * attract_target + rotation_weight * rotate_target)
+            / (attraction_weight + rotation_weight + eps)
+
+STEP 10: BACKWARD HOOK (unchanged)
+  module.weight += som_lr * (total_som - module.weight)
+  return grad * grad_mask
+```
+
+**What changes in the code:**
+
+`acc/gradient_gating.py`, `BCL._forward_hook` — replace lines 727-762 (grad_mask through som_targets):
+
+1. After rank_score + novelty (line 725), compute `win_rate`, `gradient_weight`, `rotation_weight`, `attraction_weight` (5 lines)
+2. `grad_mask = rank_score * novelty * gradient_weight` (1 line, replaces line 728)
+3. Compute `in_nbr` from winners_per_image (same as current, 4 lines)
+4. **Force 2 (global attraction):** `attract_pull`, `attract_target` — no `in_nbr` gate (6 lines)
+5. **Force 3 (local rotation):** bully direction + adjusted inputs + `rotate_pull`, `rotate_target` — WITH `in_nbr` gate (15 lines, reuses existing bully code)
+6. **Combine:** blend with attraction_weight / rotation_weight (3 lines)
+
+Total: ~34 lines replacing ~35 lines. Net diff is near zero.
+
+**What stays the same:**
+- `BCLConfig` — no new parameters
+- `BCLHealthTracker` — same metrics pipeline
+- `get_step_metrics()` — same fields (bully_magnitude still tracked)
+- Recipe — same 4 conditions
+- API, dashboard — unchanged
+- Backward hook — identical
+
+**Memory:** Same as M3-0. `adjusted_input` [B, D, 784] = 25 MB for rotation. `attract_target` uses `pull.T @ layer_input` (no per-feature expansion) so negligible additional cost.
+
+**Hypotheses:**
+- **H-M3.1-1:** Global attraction eliminates unreachable features. Unreachable < 10 (from 36-48).
+- **H-M3.1-2:** Dead features move toward diverse targets (not blob). Dead cos sim < 0.15.
+- **H-M3.1-3:** More features come alive. Dead (<1% wr) < 40 (from 59).
+- **H-M3.1-4:** L1 improves further. < 0.075.
+- **H-M3.1-5:** Effective rank > 25.
+
+**Verification:**
+- Run recipe with same 4 conditions
+- Unreachable < 10 (H-M3.1-1)
+- Dead cos sim < 0.15 (H-M3.1-2)
+- Dead count < 40 (H-M3.1-3)
+- L1 < 0.075 (H-M3.1-4)
+- Effective rank > 25 (H-M3.1-5)
+- Signal scatter: dead features have high SOM signal (bottom-right), not stuck at origin
+
+### M3-0.1 Cleanup Audit
+- [ ] `grad_mask` now includes `gradient_weight` (= win_rate). This means even batch-level winners get attenuated gradient if their overall win_rate is low. Is this desired? Yes — a feature that occasionally wins but mostly loses should get mild gradient, not full. The smooth blending handles this correctly.
+- [ ] `rotation_weight` peaks at win_rate=0.5. Are there enough features at this level to benefit? In M3-0, most features were either dead (wr<0.01) or winning (wr>0.1). If most features are dead, rotation force is near-zero for them (correct — dead features need attraction, not rotation). The rotation force matters for the transition zone.
+- [ ] Force 2 attract_target uses raw `layer_input`, not bully-adjusted. This is intentional — dead features don't have meaningful bully directions (they lose to everyone), so projecting out bullies would remove most of the signal.
 
 ---
 
@@ -571,7 +685,9 @@ M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
     ↓
 M-CGG-2.9: Bidirectional Competitive Learning (BCL) — local SOM signal for losers ✅ (FAILED: blob translation)
     ↓
-M3-0: Bully-Adjusted SOM Targets — fix blob translation with per-feature bully projection
+M3-0: Bully-Adjusted SOM Targets ✅ (directional: eff_rank 1.8→15, cos_sim 0.51→0.22, but 59 dead)
+    ↓
+M3-0.1: Three-Force BCL (global attraction + local rotation + gradient)
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -703,7 +819,9 @@ M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
     ↓
 M-CGG-2.9: Bidirectional Competitive Learning (local SOM for losers) ✅ (FAILED: blob translation)
     ↓
-M3-0: Bully-Adjusted SOM Targets (fix blob with per-feature bully projection)
+M3-0: Bully-Adjusted SOM Targets ✅ (directional improvement, blob breaking)
+    ↓
+M3-0.1: Three-Force BCL (global attraction + local rotation + gradient)
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -728,7 +846,8 @@ M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes m
 | M-CGG-2.5b: Neighborhood Gating | **DONE** | Run neighborhood gating, see per-image competition with sigmoid margins |
 | M-CGG-2.75: Residual PCA Replacement | **DONE** | Run PCA replacement for dead features, see replacement events + success rate |
 | M-CGG-2.9: Bidirectional Competitive Learning | **DONE (FAILED)** | BCL v1 causes blob translation (H3). Dead features collapse to cos_sim 0.77. Effective rank 1.8-6.1. |
-| M3-0: Bully-Adjusted SOM Targets | Not started | Fix blob translation by projecting out bully direction from SOM targets |
+| M3-0: Bully-Adjusted SOM Targets | **DONE** | Blob breaking: eff_rank 1.8→15.1, cos_sim 0.51→0.22. Still 59 dead, 36-48 unreachable. |
+| M3-0.1: Three-Force BCL | Not started | Global attraction + local rotation + gradient. Fix unreachable via global SOM for dead features. |
 | M-CGG-2.5c: Enriched Eval Metrics | Not started | See Hoyer sparsity, top-k, selectivity, feature utilization heatmap |
 | M-CGG-3: Conv AE + Depth Gating | Not started | Run gating on conv layers with depth-dependent strength |
 | M-CGG-4: Conv VAE + KL | Not started | Test gating compatibility with VAE objective |
