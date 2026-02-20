@@ -375,14 +375,155 @@ Tier 3 — Nice-to-have (deep diagnostics):
 7. Dashboard: Signal scatter panel (grad vs SOM per feature)
 8. Run recipe, verify all 6 conditions complete, analyze results against hypotheses
 
+### M-CGG-2.9 Results (BCL Experiment v1)
+
+**Run date:** 2026-02-20. Recipe: 4 conditions (control, nbr-k8, bcl-slow som_lr=0.001, bcl-med som_lr=0.005). All linear AE 784→64→784, Adam lr=1e-3, 25000 steps, batch 128.
+
+| Metric | control | nbr-k8 | bcl-slow | bcl-med | Target |
+|--------|---------|--------|----------|---------|--------|
+| L1 | **0.062** | 0.068 | 0.115 | 0.109 | < 0.050 |
+| PSNR | 13.27 | 12.75 | 10.61 | 10.78 | > 14.5 |
+| weight_cosine_sim | 0.014 | 0.091 | 0.510 | 0.812 | low |
+| activation_sparsity | 0.507 | 0.223 | 0.141 | 0.428 | - |
+| effective_rank | 54.6 | 49.0 | **1.8** | **6.1** | > 50 |
+| winners (>5% wr) | - | - | 2 | 4 | > 40 |
+| dead (<1% wr) | - | - | 62 | 59 | < 10 |
+| unreachable | - | - | 55 | 48 | < 5 |
+| dead cos sim (final) | - | - | - | 0.767 | < 0.1 |
+
+**Verdict: FAIL.** BCL v1 causes catastrophic collapse:
+
+1. **H3 confirmed (blob translation):** Dead features all get SOM-pulled toward similar inputs. Weight cosine similarity 0.51-0.81 (near-identical features). Effective rank collapses to 1.8-6.1.
+2. **Unreachable features:** 48-55/64 features get neither meaningful gradient NOR meaningful SOM signal. The SOM mechanism doesn't reach them.
+3. **Stronger SOM = worse collapse:** bcl-med (som_lr=0.005) has HIGHER cosine similarity (0.812) than bcl-slow (0.510). More SOM = more blob.
+4. **Root cause identified:** `som_targets = som_pull.T @ layer_input` computes a weighted average of RAW inputs. All dead features in similar neighborhoods see the same weighted average → move to the same place → blob.
+
+**What's needed:** The SOM target must be DIFFERENT for each feature. Each feature needs to move toward inputs with the bully direction (the direction dominated by its strongest competitors) projected out. This is M3-0.
+
 ### M-CGG-2.9 Cleanup Audit
-- [ ] SOM is applied inside the backward hook (BEFORE optimizer.step()) — does Adam then overwrite the SOM update? Answer: partially. Adam applies `lr * m_hat / (sqrt(v_hat) + eps)` to the SOM-modified weight. For losers with near-zero gradient, Adam's update is near-zero, so SOM dominates. For winners with strong gradient, Adam dominates. This is the desired behavior. But watch for: if Adam's momentum from prior steps is large for a recently-SOM-moved feature, the next Adam step might fight the SOM displacement. Monitor feature velocity for jitter at transition boundaries.
-- [ ] `novelty_clamp=3.0` — is this the right value? Too low = no asymmetry. Too high = single novel image dominates.
-- [ ] Should BCL reset Adam state for features that received large SOM displacement? (Since SOM happens in the backward hook before optimizer.step(), Adam sees the SOM-modified weight. If a loser was moved far by SOM, Adam's momentum/variance estimates are stale for the new position. Consider resetting Adam state for features where SOM displacement exceeds a threshold.)
-- [ ] Memory: `input[0].detach()` capture is [B, 784] per forward pass = 100KB at B=128. Negligible.
-- [ ] Decoder BCL: Not included in M-CGG-2.9. The encoder BCL should be sufficient — decoder features are the transpose. If encoder features diversify, decoder should follow via gradient. Add decoder BCL as a follow-up experiment if encoder-only BCL works.
-- [ ] The `get_step_metrics()` internal_diversity computation does a `torch.bmm` of [D, k, in_features] — for D=64, k=8, in_features=784 this is a [64, 8, 784] tensor. ~400KB, acceptable. But for larger models this may need to be sampled or deferred.
-- [ ] Should BCL track per-digit win source for hypothesis H1/H11? This requires access to labels during training, which we don't currently have in the metrics path. Defer to Tier 3 / M-CGG-2.5c.
+- [x] SOM is applied inside the backward hook (BEFORE optimizer.step()) — does Adam then overwrite the SOM update? Answer: partially. For losers with near-zero gradient, Adam's update is near-zero, so SOM dominates. For winners with strong gradient, Adam dominates. This is the desired behavior. CONFIRMED in experiment: SOM dominates losers, gradient dominates winners. The PROBLEM is that SOM pulls all losers to the same place.
+- [ ] `novelty_clamp=3.0` — moot until blob translation is fixed.
+- [ ] Should BCL reset Adam state for features that received large SOM displacement? — moot until SOM targets diverge.
+- [x] Memory: `input[0].detach()` capture is [B, 784] per forward pass = 100KB at B=128. Confirmed negligible.
+- [ ] Decoder BCL: Not included. Encoder BCL must work first.
+
+---
+
+### M3-0: Bully-Adjusted SOM Targets
+
+**Functionality:** BCL's SOM mechanism gives each dead feature a UNIQUE target by projecting out the "bully direction" — the blend of competitor weight vectors that dominate it. Each feature moves toward the parts of the input that its bullies DON'T cover, breaking the blob translation that killed BCL v1.
+
+**Foundation:** Surgical modification to `BCL._forward_hook` in `acc/gradient_gating.py`. Steps 1-5 (competition, novelty, gradient mask) and Step 9 (backward hook) are UNCHANGED. The change replaces the SOM target computation (old lines 730-739) with three new phases.
+
+**Why this fixes the blob:** In BCL v1, all dead features in the same neighborhood computed `som_targets = weighted_avg(raw_inputs)` — the same weighted average, the same target, the same blob. In M3-0, each feature f first computes its "bully direction" (a blend of the neighbor weight vectors that beat it most), then projects that direction out of each input image before averaging. Feature 12's bully is different from Feature 31's bully, so their adjusted inputs are different, so their SOM targets diverge.
+
+**The Algorithm (Steps 6-8, replacing old SOM target computation):**
+
+```
+STEP 6: WHO BEATS YOU AND BY HOW MUCH?
+  # Feature 12 looks at its 8 neighbors across the whole batch.
+  # Neighbor 7 beats feature 12 on 60 images, average margin 0.5
+  # Neighbor 19 beats feature 12 on 40 images, average margin 0.3
+  # Neighbor 3 beats feature 12 on 10 images, average margin 0.1
+  # Feature 12's bully direction = weighted blend of these neighbors'
+  # weight vectors, weighted by how badly they beat it.
+  # This points toward "where the features that dominate me live."
+  for each feature f:
+    for each neighbor i:
+      how_much_i_beats_f = mean over batch of max(0, strength[i] - strength[f])
+    normalize into weights summing to 1
+    bully_direction[f] = normalize(weighted sum of neighbor weight vectors)
+
+STEP 7: ADJUST INPUTS BY REMOVING BULLY DIRECTION
+  # Feature 12's bully direction points toward "generic 7 detector."
+  # For each image, remove that direction:
+  #   Image 45 is a 7. Remove the generic-7-detector component.
+  #   What's left: the parts of this 7 that the bullies miss.
+  #   The serif. The slant. The unusual thickness.
+  #   THIS is where feature 12 should move to become unique.
+  #
+  # Every feature gets its OWN adjusted version of every image
+  # because every feature has different bullies.
+  overlap[image, feature] = dot(X[image], bully_direction[feature])
+  adjusted_input[image, feature] = X[image] - overlap * bully_direction[feature]
+
+STEP 8: COMPUTE SOM TARGETS FOR LOSERS (modified)
+  # Same weighting as BCL v1 (1-rank_score, novelty, in_neighborhood)
+  # but uses adjusted_input instead of raw layer_input.
+  # Each feature's target is now UNIQUE because each sees different
+  # adjusted inputs (different bully projections removed).
+  pull[image, feature] = (1 - rank_score) * novelty * in_neighborhood
+  pull = pull / sum_over_images(pull)
+  target[feature] = weighted average of adjusted_input using pull weights
+```
+
+**What stays the same:**
+- `BCLConfig` — no new parameters (bully direction derived from existing competition data)
+- `BCLHealthTracker` — same metrics pipeline. Scatter/winrate/diversity still work.
+- `get_step_metrics()` — add `bully_magnitude` to metrics dict for diagnostics
+- Recipe — same 4 conditions (control, nbr-k8, bcl-slow, bcl-med)
+- API endpoint `/eval/bcl/diagnostics` — unchanged
+- Dashboard `BCLDiagnostics.tsx` — unchanged (same scatter/heatmap/diversity tabs)
+- Backward hook — identical structure (`module.weight += som_lr * (target - module.weight)`)
+
+**Memory cost:** `adjusted_input` is [B, D, in_features] = [128, 64, 784] = 25.2 MB float32. Fine for GPU with MNIST. For larger models, would need chunked computation over features.
+
+**Files to modify:**
+1. `acc/gradient_gating.py` — `BCL._forward_hook`: replace lines 730-739 with Steps 6-7-8 (~30 lines of tensor ops)
+2. `docs/CGG_PLAN.md` — this milestone spec (done)
+
+**Implementation (tensor ops for Steps 6-7-8):**
+
+```python
+# --- Step 6: Bully direction per feature ---
+# neighbor_strengths is already [B, D, k] from Step 3
+# strength is [B, D]
+strength_exp = strength.unsqueeze(2).expand_as(neighbor_strengths)  # [B, D, k]
+beat_margin = (neighbor_strengths - strength_exp).clamp(min=0)     # [B, D, k]
+beat_mean = beat_margin.mean(dim=0)  # [D, k] — avg margin per neighbor
+
+beat_weights = beat_mean / (beat_mean.sum(dim=1, keepdim=True) + 1e-8)  # [D, k]
+
+W = module.weight.detach()  # [D, in_features]
+neighbor_weights = W[neighbors]  # [D, k, in_features]
+bully_raw = torch.einsum('dk,dki->di', beat_weights, neighbor_weights)  # [D, in_features]
+bully_direction = F.normalize(bully_raw, dim=1)  # [D, in_features]
+
+# --- Step 7: Adjusted inputs per feature ---
+# layer_input is [B, in_features], bully_direction is [D, in_features]
+overlap = layer_input @ bully_direction.T  # [B, D]
+# adjusted_input[b, d, :] = layer_input[b, :] - overlap[b, d] * bully_direction[d, :]
+adjusted_input = layer_input.unsqueeze(1) - overlap.unsqueeze(2) * bully_direction.unsqueeze(0)
+# [B, D, in_features]
+
+# --- Step 8: SOM targets using adjusted inputs ---
+som_weight = (1.0 - rank_score) * in_nbr * novelty.unsqueeze(1)  # [B, D]
+som_norm = som_weight.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
+som_pull = som_weight / som_norm  # [B, D]
+# Per-feature weighted average of adjusted inputs
+som_targets = torch.einsum('bd,bdi->di', som_pull, adjusted_input)  # [D, in_features]
+```
+
+**Hypotheses:**
+- **H-M3-1:** Bully projection breaks blob symmetry. Dead feature cosine similarity should decrease from 0.77 → < 0.3 by end of training.
+- **H-M3-2:** More features become reachable. Unreachable count should drop from 48-55 → < 20.
+- **H-M3-3:** Reconstruction quality improves. L1 should drop from 0.109-0.115 → < 0.080 (closer to control's 0.062).
+- **H-M3-4:** Effective rank increases. From 1.8-6.1 → > 20.
+
+**Verification:**
+- Run recipe with same 4 conditions
+- BCL conditions: dead feature cosine similarity < 0.3 (H-M3-1)
+- BCL conditions: unreachable < 20 (H-M3-2)
+- BCL conditions: L1 < 0.080 (H-M3-3)
+- BCL conditions: effective rank > 20 (H-M3-4)
+- Signal scatter shows two populations (winners top-left, losers bottom-right) not a blob at origin
+- If bully adjustment helps but doesn't fully solve: next step is per-feature noise or stochastic SOM targets
+
+### M3-0 Cleanup Audit
+- [ ] The `adjusted_input` tensor [B, D, 784] is 25 MB. For conv layers with larger in_features, this needs chunking.
+- [ ] `bully_direction` is recomputed every forward pass. Could cache and recompute every `recompute_every` steps like neighborhoods, but the cost is dominated by the einsum, not the bully computation.
+- [ ] Should `bully_magnitude` (per-feature norm of bully_raw before normalization) be tracked? High bully_magnitude = feature is heavily dominated. Low = feature is competitive. Could be a useful diagnostic.
+- [ ] What if a feature has NO neighbors that beat it (all beat_margin = 0)? Then bully_direction is zero vector, adjusted_input = raw input, SOM target = old behavior. This is correct — winners shouldn't have their SOM targets adjusted.
 
 ---
 
@@ -428,7 +569,9 @@ M-CGG-2.5b: Neighborhood gating mechanism (the fix for mode collapse) ✅
     ↓
 M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
     ↓
-M-CGG-2.9: Bidirectional Competitive Learning (BCL) — local SOM signal for losers
+M-CGG-2.9: Bidirectional Competitive Learning (BCL) — local SOM signal for losers ✅ (FAILED: blob translation)
+    ↓
+M3-0: Bully-Adjusted SOM Targets — fix blob translation with per-feature bully projection
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -558,7 +701,9 @@ M-CGG-2.5b: Neighborhood gating mechanism (fix for mode collapse) ✅
     ↓
 M-CGG-2.75: Residual PCA replacement (dead feature recovery) ✅
     ↓
-M-CGG-2.9: Bidirectional Competitive Learning (local SOM for losers)
+M-CGG-2.9: Bidirectional Competitive Learning (local SOM for losers) ✅ (FAILED: blob translation)
+    ↓
+M3-0: Bully-Adjusted SOM Targets (fix blob with per-feature bully projection)
     ↓
 M-CGG-2.5c: Enriched eval metrics + feature utilization map
     ↓
@@ -582,7 +727,8 @@ M-CGG-1 and M-CGG-2 are the critical pair — confirmed: softmax gating causes m
 | M-CGG-2.5a: Training-Time Metrics | **DONE** | Watch entropy + gradient CV evolve in real-time during training |
 | M-CGG-2.5b: Neighborhood Gating | **DONE** | Run neighborhood gating, see per-image competition with sigmoid margins |
 | M-CGG-2.75: Residual PCA Replacement | **DONE** | Run PCA replacement for dead features, see replacement events + success rate |
-| M-CGG-2.9: Bidirectional Competitive Learning | Not started | Run BCL with SOM-style loser recovery, see feature dynamics + velocity |
+| M-CGG-2.9: Bidirectional Competitive Learning | **DONE (FAILED)** | BCL v1 causes blob translation (H3). Dead features collapse to cos_sim 0.77. Effective rank 1.8-6.1. |
+| M3-0: Bully-Adjusted SOM Targets | Not started | Fix blob translation by projecting out bully direction from SOM targets |
 | M-CGG-2.5c: Enriched Eval Metrics | Not started | See Hoyer sparsity, top-k, selectivity, feature utilization heatmap |
 | M-CGG-3: Conv AE + Depth Gating | Not started | Run gating on conv layers with depth-dependent strength |
 | M-CGG-4: Conv VAE + KL | Not started | Test gating compatibility with VAE objective |
