@@ -795,6 +795,9 @@ class BCL:
         # Different dead features get pulled toward DIFFERENT images
         # because their weight vectors point in different directions.
         # Symmetry broken by initialization geometry.
+        #
+        # TOP-K SPARSE: only pull toward the k images with highest affinity
+        # per feature. Prevents the weighted-average-of-128-images blob.
         W = module.weight.detach()  # [D, 784]
         W_norm = W / (W.norm(dim=1, keepdim=True) + 1e-8)  # [D, 784]
         X_norm = layer_input / (
@@ -802,8 +805,16 @@ class BCL:
         )  # [B, 784]
         affinity = (X_norm @ W_norm.T).clamp(min=0)  # [B, D] non-negative only
 
-        # Pure affinity — pull toward images you're geometrically closest to
-        rescue_pull = affinity  # [B, D]
+        # Weight by image need (how underserved each image is)
+        image_need = 1.0 / (image_coverage + 1.0)  # [B]
+        weighted_affinity = affinity * image_need.unsqueeze(1)  # [B, D]
+
+        # Top-k sparsification: keep only top-k images per feature, zero the rest
+        rescue_k = min(8, B)
+        # topk along dim=0 (batch dimension) for each feature column
+        topk_vals, topk_idx = weighted_affinity.topk(rescue_k, dim=0)  # [k, D]
+        rescue_pull = torch.zeros_like(weighted_affinity)  # [B, D]
+        rescue_pull.scatter_(0, topk_idx, topk_vals)  # [B, D] sparse
 
         # Normalize per feature into pull weights
         rescue_pull_sum = rescue_pull.sum(dim=0)  # [D] — diagnostic
@@ -838,6 +849,11 @@ class BCL:
             "local_novelty": local_novelty.detach(),  # [B, D]
             "local_target": rescue_target.detach(),  # [D, in_features] — rescue target
             "som_targets": som_targets.detach(),  # [D, in_features]
+            # Rescue diagnostics (5 vectors)
+            "affinity": affinity.detach(),  # [B, D]
+            "image_need": image_need.detach(),  # [B]
+            "weighted_affinity": weighted_affinity.detach(),  # [B, D]
+            "rescue_pull": rescue_pull.detach(),  # [B, D] (sparse, normalized)
         }
 
         # --- Register backward hook: gradient mask + SOM update ---

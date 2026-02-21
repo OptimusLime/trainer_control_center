@@ -83,6 +83,12 @@ class StepTensorKey(str, Enum):
         "local_pull_sum"  # [D] raw pull signal per feature (pre-normalization)
     )
 
+    # -- Rescue diagnostics --
+    AFFINITY = "affinity"  # [B, D] cosine sim of each image to each feature
+    IMAGE_NEED = "image_need"  # [B] 1/(image_coverage+1), how underserved
+    WEIGHTED_AFFINITY = "weighted_affinity"  # [B, D] affinity * image_need
+    RESCUE_PULL = "rescue_pull"  # [B, D] sparse normalized pull weights
+
     # -- Gradient --
     GRAD_MASKED = "grad_masked"  # [D, in_features]
 

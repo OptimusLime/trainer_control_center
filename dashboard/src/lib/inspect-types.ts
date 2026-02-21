@@ -28,6 +28,10 @@ export enum StepTensorKey {
   SOM_DELTA = 'som_delta',
   GRAD_MASKED = 'grad_masked',
   LOCAL_PULL_SUM = 'local_pull_sum',
+  AFFINITY = 'affinity',
+  IMAGE_NEED = 'image_need',
+  WEIGHTED_AFFINITY = 'weighted_affinity',
+  RESCUE_PULL = 'rescue_pull',
   ENCODER_WEIGHTS_POST = 'encoder_weights_post',
 }
 

@@ -292,6 +292,46 @@ export default function InspectPanel() {
             )}
           </div>
 
+          {/* Rescue diagnostics: the 5 vectors that determine SOM targets */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginTop: '16px' }}>
+            {/* 1. Affinity [B,D] — cosine sim of each image to each feature */}
+            {stepData[StepTensorKey.AFFINITY] && Array.isArray(stepData[StepTensorKey.AFFINITY]) && (
+              <div className="panel" style={{ padding: '12px' }}>
+                <InspectHeatmap
+                  data={stepData[StepTensorKey.AFFINITY] as number[][]}
+                  title="1. Affinity [B,D] (cos sim image-to-feature)"
+                  xLabel="Features (D=64)"
+                  yLabel="Batch (B=128)"
+                  colorScale="viridis"
+                />
+              </div>
+            )}
+            {/* 4. Weighted Affinity [B,D] — affinity * image_need */}
+            {stepData[StepTensorKey.WEIGHTED_AFFINITY] && Array.isArray(stepData[StepTensorKey.WEIGHTED_AFFINITY]) && (
+              <div className="panel" style={{ padding: '12px' }}>
+                <InspectHeatmap
+                  data={stepData[StepTensorKey.WEIGHTED_AFFINITY] as number[][]}
+                  title="4. Weighted Affinity [B,D] (affinity * need)"
+                  xLabel="Features (D=64)"
+                  yLabel="Batch (B=128)"
+                  colorScale="hot"
+                />
+              </div>
+            )}
+            {/* 5. Rescue Pull [B,D] — sparse normalized pull weights */}
+            {stepData[StepTensorKey.RESCUE_PULL] && Array.isArray(stepData[StepTensorKey.RESCUE_PULL]) && (
+              <div className="panel" style={{ padding: '12px' }}>
+                <InspectHeatmap
+                  data={stepData[StepTensorKey.RESCUE_PULL] as number[][]}
+                  title="5. Rescue Pull [B,D] (top-k sparse, normalized)"
+                  xLabel="Features (D=64)"
+                  yLabel="Batch (B=128)"
+                  colorScale="hot"
+                />
+              </div>
+            )}
+          </div>
+
           {/* Weight grids: [D, 784] as 28x28 thumbnails */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginTop: '16px' }}>
             {/* Encoder Weights */}

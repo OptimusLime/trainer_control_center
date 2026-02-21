@@ -1783,6 +1783,11 @@ class TrainerAPI:
                         (StepTensorKey.LOCAL_TARGET, "local_target"),
                         (StepTensorKey.SOM_TARGETS, "som_targets"),
                         (StepTensorKey.LOCAL_PULL_SUM, "local_pull_raw_sum"),
+                        # Rescue diagnostics
+                        (StepTensorKey.AFFINITY, "affinity"),
+                        (StepTensorKey.IMAGE_NEED, "image_need"),
+                        (StepTensorKey.WEIGHTED_AFFINITY, "weighted_affinity"),
+                        (StepTensorKey.RESCUE_PULL, "rescue_pull"),
                     ]:
                         if metric_key in m:
                             inspector.capture(tensor_key, m[metric_key])
