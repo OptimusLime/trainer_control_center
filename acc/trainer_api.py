@@ -1675,12 +1675,14 @@ class TrainerAPI:
                 "bcl-med": 0.005,
                 "bcl-fast": 0.01,
             }.get(condition, 0.005)
+            rescue_k = data.get("rescue_k", 3)
             bcl_config = BCLConfig(
                 neighborhood_k=8,
                 temperature=5.0,
                 som_lr=som_lr,
                 novelty_clamp=3.0,
                 recompute_every=50,
+                rescue_k=rescue_k,
             )
             bcl = attach_bcl(model, "encoder.0", bcl_config)
 

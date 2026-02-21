@@ -665,7 +665,7 @@ class BCLConfig:
     som_lr: float = 0.005
     novelty_clamp: float = 3.0
     recompute_every: int = 50
-    rescue_k: int = 1
+    rescue_k: int = 5
 
 
 class BCL:

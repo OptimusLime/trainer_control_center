@@ -293,6 +293,186 @@ The gradient suppression is a separate problem from rescue collapse. Even if res
 targets were perfectly diverse, the algorithm wouldn't learn useful features because
 the gradient signal (which carries task information) is being zeroed out.
 
+---
+
+## Fix Attempt 3: Decouple Gradient and SOM Forces
+
+**Implemented**: Separate the two forces entirely. Gradient's job is reconstruction
+(did you win? you get the loss signal). SOM's job is diversity (are you redundant?
+you get repositioned). Previously these were tangled through `effective_win`.
+
+```python
+# OLD (coupled — crushed gradient):
+effective_win = win_rate * feature_novelty          # ~0.016
+gradient_weight = effective_win
+grad_mask = rank_score * feature_novelty * gradient_weight  # triple product → ~0.0003
+som_weight_d = 1 - effective_win                    # ~0.984
+
+# NEW (decoupled):
+grad_mask = rank_score                              # winners get gradient, period
+som_weight_d = 1 - feature_novelty                  # redundant features get SOM pull
+# SOM target blend: win_rate * winner_target + (1-win_rate) * rescue_target
+# Backward hook: weight += som_lr * som_weight_d * (target - weight)
+```
+
+### Results: Force balance restored
+
+```
+         |  Before (coupled)    |  After (decoupled)
+         |  Adam/SOM ratio      |  Adam/SOM ratio
+---------|----------------------|--------------------
+Step 5   |  ~0.00001x (dead)    |       7.4x
+Step 50  |  ~0.00001x           |      34.2x
+Step 100 |  ~0.00001x           |      51.6x
+Step 300 |  ~0.00001x           |     107.7x
+```
+
+Adam now delivers 7-108x more force than SOM. The gradient is alive and learning —
+loss drops from 0.47 to 0.11 in 100 steps. The algorithm is now "gradient does
+reconstruction, SOM does diversity" as intended.
+
+### 10,000 step trajectory (bcl-slow, rescue_k=5)
+
+```
+  step |   loss | wt_sim | tgt_sim | unique_tgt | alive | feature_novelty
+-------|--------|--------|---------|------------|-------|----------------
+     0 |  0.474 |  0.000 |   0.760 |         28 |    64 |  0.052
+    10 |  0.400 |  0.046 |   0.833 |         15 |    64 |  0.082
+    50 |  0.127 |  0.488 |   0.877 |         10 |    64 |  0.099
+   100 |  0.124 |  0.674 |   0.924 |          6 |    64 |  0.177
+   300 |  0.112 |  0.857 |   0.852 |          9 |    64 |  0.075
+   500 |  0.110 |  0.867 |   0.833 |         12 |    64 |  0.053
+  1000 |  0.094 |  0.871 |   0.857 |          9 |    64 |  0.052
+  2000 |  0.093 |  0.909 |   0.933 |         11 |    64 |  0.082
+  3000 |  0.091 |  0.941 |   0.906 |         10 |    58 |  0.061
+  5000 |  0.093 |  0.946 |   0.951 |          6 |    64 |  0.049
+ 10000 |  0.096 |  0.945 |   0.955 |          4 |    64 |  0.082
+```
+
+### rescue_k comparison (bcl-slow, 300 steps)
+
+```
+ k  | wt_sim | loss  | unique_tgt
+----|--------|-------|----------
+  1 |  0.848 | 0.115 |     4
+  3 |  0.845 | 0.112 |    10
+  5 |  0.803 | 0.112 |    11
+  8 |  0.828 | 0.109 |     7
+ 16 |  0.815 | 0.113 |     9
+```
+
+k=5 is the sweet spot: lowest weight similarity, good target diversity, equivalent loss.
+
+### What improved
+- **Gradient is alive**: loss drops from 0.47 to 0.09 (real reconstruction learning)
+- **All 64 features stay alive** through 10k steps
+- **Loss saturates at ~0.09** (comparable to non-BCL autoencoder baseline)
+
+### What did NOT improve
+- **Weight similarity reaches 0.945 at 10k steps** — features converge to near-identical
+- **Loss plateaus at 0.09 and ticks UP after 5k** — no continued improvement
+- **Unique rescue targets collapse to 4** by 10k — SOM targets nearly identical
+- **feature_novelty is flat at 0.05** — SOM has no diversity signal
+
+---
+
+## Finding 7: Gradient Convergence Is the Remaining Problem
+
+With gradient restored, weight convergence is now driven by the reconstruction loss
+itself, not by SOM collapse. A single MSE reconstruction loss has no incentive for
+feature diversity — all 64 features converge toward the same optimal reconstruction
+direction because the loss landscape rewards them all for the same thing.
+
+The SOM at `som_lr=0.001` is 7-108x weaker than Adam. It cannot push back against
+gradient convergence. By step 10k, SOM is ~100x weaker per step and has been
+outpaced cumulatively by orders of magnitude.
+
+### The fundamental tension
+
+```
+Gradient: "minimize reconstruction error" → all features → same optimal direction
+SOM: "spread out, cover different territory" → features → diverse directions
+```
+
+These forces are in direct opposition. Gradient wins because it's 100x stronger.
+The features become good at reconstruction (loss 0.09) but redundant (wt_sim 0.945).
+
+### Why feature_novelty can't differentiate
+
+`feature_novelty` measures "of the images you win, how unique are they?" But when
+all features have similar weights, they all win the same images — so all features
+have the same novelty. It's a chicken-and-egg: novelty can only differentiate features
+that are already different.
+
+```
+feature_novelty range at step 0:    0.051 - 0.055  (range 0.004)
+feature_novelty range at step 10k:  0.049 - 0.082  (range 0.033)
+```
+
+The signal is too flat to meaningfully modulate SOM strength.
+
+## Potential Fixes (Next Steps)
+
+### Fix A: Increase SOM lr to compete with Adam
+
+The simplest fix. If `som_lr=0.001` gives Adam a 100x advantage, try `som_lr=0.01`
+or `som_lr=0.05` to make SOM 10-50x stronger. Risk: too much SOM disrupts gradient
+learning, loss goes up, features become diverse but bad at reconstruction.
+
+The right balance is where loss stays low (~0.09) but wt_sim stops climbing. This is
+an empirical search: sweep som_lr in {0.005, 0.01, 0.02, 0.05} at 10k steps.
+
+### Fix B: SOM operates in a different space
+
+Currently SOM directly modifies `weight`, fighting the same parameters that gradient
+optimizes. Alternative: SOM operates on a separate "feature position" vector that
+influences competition (neighborhoods, rescue targets) but doesn't directly touch
+the weights gradient is optimizing. The encoder weight = gradient_component + som_offset.
+Gradient optimizes reconstruction through gradient_component. SOM optimizes diversity
+through som_offset. They compose rather than fight.
+
+This is a bigger architectural change but eliminates the fundamental tension.
+
+### Fix C: Diversity-aware loss
+
+Instead of SOM pushing weights apart post-hoc, add a diversity term to the loss
+itself. The gradient then naturally optimizes for both reconstruction AND diversity:
+
+```python
+loss = reconstruction_loss + lambda * diversity_penalty
+# where diversity_penalty = mean pairwise cosine similarity of feature weights
+# or: negative entropy of feature activations across the batch
+```
+
+This means gradient itself drives diversity. No need for SOM to fight gradient —
+they're aligned. The risk is that the penalty term must be carefully weighted
+(lambda too high → diverse but bad features, lambda too low → no effect).
+
+### Fix D: Winner-take-all gradient masking
+
+Current `grad_mask = rank_score` gives gradient to everyone proportional to how much
+they won. With rank_score being a soft sigmoid, even "losers" get some gradient
+(rank_score ~0.3 for near-ties). This dilutes the competitive signal.
+
+Hard winner-take-all: only the argmax feature per image gets gradient. This creates
+stronger specialization pressure — each feature only learns from images it uniquely
+won, not images it partially won. Combined with SOM repositioning losers, this could
+create genuine division of labor.
+
+```python
+# Hard WTA: only the winner per image gets gradient
+winners = rank_score.argmax(dim=1)  # [B] — one winner per image
+grad_mask = torch.zeros_like(rank_score)
+grad_mask.scatter_(1, winners.unsqueeze(1), 1.0)  # [B, D] one-hot per image
+```
+
+### Recommended approach
+
+**Fix A first** (som_lr sweep) — it's one parameter change, tests in 5 minutes,
+and tells us whether the algorithm CAN work with the right balance. If no som_lr
+value gives both low loss and low wt_sim, the forces are fundamentally incompatible
+and we need Fix B or C.
+
 ## Raw Data
 
 ### Baseline affinity with random weights (5 seeds)
