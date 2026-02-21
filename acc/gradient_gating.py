@@ -718,88 +718,85 @@ class BCL:
         margin = strength - max_neighbor  # [B, D]
         rank_score = torch.sigmoid(margin * cfg.temperature)  # [B, D]
 
-        # --- Image novelty ---
-        image_crowding = rank_score.sum(dim=1)  # [B]
-        novelty = 1.0 / (image_crowding + 1e-8)  # [B]
-        novelty = novelty / (novelty.mean() + 1e-8)  # normalize mean=1
-        novelty = novelty.clamp(max=cfg.novelty_clamp)  # [B]
+        # --- Step 4: Image coverage ---
+        image_coverage = rank_score.sum(dim=1)  # [B] — how many features claim each image
 
-        # --- Step 5: Feature status + force blending weights ---
+        # --- Step 5: Feature novelty ---
+        # Of the images you win, how unique are they?
+        feature_novelty = (
+            (rank_score / (image_coverage.unsqueeze(1) + 1e-8)).sum(dim=0)
+            / (rank_score.sum(dim=0) + 1e-8)
+        )  # [D] — high = unique territory, low = redundant
+
+        # --- Step 6: Local coverage + local novelty ---
+        # For each (image, feature): how many of YOUR neighbors also won?
+        neighbor_rank_scores = torch.gather(
+            rank_score.unsqueeze(1).expand(-1, D, -1),
+            dim=2, index=neighbors_exp,
+        )  # [B, D, k]
+        local_coverage = neighbor_rank_scores.sum(dim=2)  # [B, D]
+        local_novelty = 1.0 / (local_coverage + 1.0)     # [B, D]
+
+        # --- Step 7: Win rate + blending weights ---
         win_rate = rank_score.mean(dim=0)  # [D]
-        gradient_weight = win_rate                              # [D] — peaks for winners
-        rotation_weight = win_rate * (1 - win_rate) * 4         # [D] — peaks at wr=0.5
-        attraction_weight = 1.0 - win_rate                      # [D] — peaks for dead
-
-        # --- Step 6: Force 1 — Gradient (for winners) ---
-        grad_mask = (
-            rank_score * novelty.unsqueeze(1) * gradient_weight.unsqueeze(0)
-        )  # [B, D]
+        effective_win = win_rate * feature_novelty             # [D] — high only if winning AND unique
+        gradient_weight = effective_win                        # [D] — unique winners get gradient
+        contender_weight = (1.0 - effective_win) * win_rate    # [D] — winning but redundant → local pull
+        attraction_weight = (1.0 - effective_win) * (1.0 - win_rate)  # [D] — losing → global pull
 
         # --- Shared: in_neighborhood mask ---
         winners_per_image = rank_score.argmax(dim=1)  # [B]
-        winner_nbrs = neighbors[winners_per_image]  # [B, k]
+        winner_nbrs = neighbors[winners_per_image]    # [B, k]
         in_nbr = torch.zeros(B, D, device=act.device)
-        in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
+        in_nbr.scatter_(1, winner_nbrs, 1.0)          # [B, D]
 
-        # --- Step 7: Force 2 — Global attraction (for dead features) ---
-        # NO in_neighborhood gate — dead features search globally
-        attract_pull = (
-            (1.0 - rank_score) * novelty.unsqueeze(1) * attraction_weight.unsqueeze(0)
+        # --- Step 8: Force 1 — Gradient (unique winners get strong gradient) ---
+        grad_mask = (
+            rank_score * feature_novelty.unsqueeze(0) * gradient_weight.unsqueeze(0)
         )  # [B, D]
-        attract_norm = attract_pull.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
-        attract_pull = attract_pull / attract_norm  # [B, D]
-        attract_target = attract_pull.T @ layer_input  # [D, in_features]
 
-        # --- Step 8: Force 3 — Local rotation (for contenders) ---
-        # Bully direction: weighted blend of neighbors that beat you
-        strength_exp = strength.unsqueeze(2).expand_as(neighbor_strengths)  # [B, D, k]
-        beat_margin = (neighbor_strengths - strength_exp).clamp(min=0)     # [B, D, k]
-        beat_mean = beat_margin.mean(dim=0)  # [D, k]
-        beat_weights = beat_mean / (beat_mean.sum(dim=1, keepdim=True) + 1e-8)  # [D, k]
-
-        W = module.weight.detach()  # [D, in_features]
-        neighbor_weights = W[neighbors]  # [D, k, in_features]
-        bully_raw = torch.einsum('dk,dki->di', beat_weights, neighbor_weights)  # [D, in_features]
-        bully_direction = torch.nn.functional.normalize(bully_raw, dim=1)  # [D, in_features]
-
-        # Project bully direction out of inputs
-        overlap = layer_input @ bully_direction.T  # [B, D]
-        rotated_input = (
-            layer_input.unsqueeze(1)
-            - overlap.unsqueeze(2) * bully_direction.unsqueeze(0)
-        )  # [B, D, in_features]
-
-        # Pull toward rotated inputs — LOCAL, needs in_neighborhood
-        rotate_pull = (
-            (1.0 - rank_score) * novelty.unsqueeze(1)
-            * in_nbr * rotation_weight.unsqueeze(0)
+        # --- Step 9: Force 2 — Local novelty pull (contenders find sub-niches) ---
+        # Pull toward images that are locally novel — edge cases your neighbors miss
+        local_pull = (
+            rank_score * local_novelty
+            * (1.0 - feature_novelty).unsqueeze(0)
+            * in_nbr * contender_weight.unsqueeze(0)
         )  # [B, D]
-        rotate_norm = rotate_pull.sum(dim=0, keepdim=True) + 1e-8  # [1, D]
-        rotate_pull = rotate_pull / rotate_norm  # [B, D]
-        rotate_target = torch.einsum('bd,bdi->di', rotate_pull, rotated_input)  # [D, in_features]
+        local_norm = local_pull.sum(dim=0, keepdim=True) + 1e-8
+        local_pull = local_pull / local_norm
+        local_target = local_pull.T @ layer_input  # [D, in_features]
 
-        # --- Step 9: Combine SOM targets ---
+        # --- Step 10: Force 3 — Global attraction (dead features find uncovered territory) ---
+        # Pull toward globally underserved images, no neighborhood gate
+        global_pull = (
+            (1.0 - rank_score)
+            * (1.0 / (image_coverage.unsqueeze(1) + 1e-8))
+            * attraction_weight.unsqueeze(0)
+        )  # [B, D]
+        global_norm = global_pull.sum(dim=0, keepdim=True) + 1e-8
+        global_pull = global_pull / global_norm
+        global_target = global_pull.T @ layer_input  # [D, in_features]
+
+        # --- Step 11: Combine SOM targets ---
+        cw = contender_weight.unsqueeze(1)  # [D, 1]
         aw = attraction_weight.unsqueeze(1)  # [D, 1]
-        rw = rotation_weight.unsqueeze(1)    # [D, 1]
-        som_targets = (aw * attract_target + rw * rotate_target) / (aw + rw + 1e-8)
+        som_targets = (cw * local_target + aw * global_target) / (cw + aw + 1e-8)
         # [D, in_features]
 
-        # Total SOM weight for metrics (combine both forces)
+        # SOM weight for metrics (total force magnitude per feature)
         som_weight = (
-            (1.0 - rank_score) * novelty.unsqueeze(1)
-            * (attraction_weight.unsqueeze(0) + in_nbr * rotation_weight.unsqueeze(0))
+            local_pull * contender_weight.unsqueeze(0)
+            + global_pull * attraction_weight.unsqueeze(0)
         )  # [B, D]
 
         # --- Store metrics for this step ---
-        bully_magnitude = bully_raw.norm(dim=1)  # [D]
         self._last_metrics = {
-            'rank_score': rank_score.detach(),       # [B, D]
-            'novelty': novelty.detach(),             # [B]
-            'grad_mask': grad_mask.detach(),         # [B, D]
-            'som_weight': som_weight.detach(),       # [B, D]
-            'strength': strength.detach(),           # [B, D]
-            'in_nbr': in_nbr.detach(),               # [B, D]
-            'bully_magnitude': bully_magnitude.detach(),  # [D]
+            'rank_score': rank_score.detach(),          # [B, D]
+            'feature_novelty': feature_novelty.detach(),  # [D]
+            'grad_mask': grad_mask.detach(),            # [B, D]
+            'som_weight': som_weight.detach(),          # [B, D]
+            'strength': strength.detach(),              # [B, D]
+            'in_nbr': in_nbr.detach(),                  # [B, D]
         }
 
         # --- Register backward hook: gradient mask + SOM update ---
@@ -824,12 +821,11 @@ class BCL:
             return None
 
         m = self._last_metrics
-        rs = m['rank_score']     # [B, D]
-        gm = m['grad_mask']      # [B, D]
-        sw = m['som_weight']     # [B, D]
-        st = m['strength']       # [B, D]
-        nov = m['novelty']       # [B]
-        bm = m['bully_magnitude']  # [D]
+        rs = m['rank_score']         # [B, D]
+        gm = m['grad_mask']          # [B, D]
+        sw = m['som_weight']         # [B, D]
+        st = m['strength']           # [B, D]
+        fn = m['feature_novelty']    # [D]
 
         win_rate = rs.mean(dim=0)              # [D]
         grad_magnitude = gm.sum(dim=0)         # [D]
@@ -841,9 +837,9 @@ class BCL:
             'grad_magnitude': grad_magnitude,   # [D]
             'som_magnitude': som_magnitude,     # [D]
             'mean_activation': mean_activation, # [D]
-            'bully_magnitude': bm,             # [D]
-            'mean_novelty': nov.mean().item(),
-            'novelty_std': nov.std().item(),
+            'feature_novelty': fn,             # [D]
+            'mean_novelty': fn.mean().item(),
+            'novelty_std': fn.std().item(),
             'mean_crowding': rs.sum(dim=1).mean().item(),
             'crowding_std': rs.sum(dim=1).std().item(),
         }
