@@ -21,6 +21,7 @@ import { StepTensorKey } from '../lib/inspect-types';
 import InspectMetricsTable from './InspectMetricsTable';
 import InspectHeatmap from './InspectHeatmap';
 import InspectWeightGrid from './InspectWeightGrid';
+import InspectBarChart from './InspectBarChart';
 import { useEffect, useState } from 'react';
 
 const CONDITIONS = ['bcl-micro', 'bcl-tiny', 'bcl-slow', 'bcl-med', 'bcl-fast'] as const;
@@ -292,44 +293,115 @@ export default function InspectPanel() {
             )}
           </div>
 
-          {/* Rescue diagnostics: the 5 vectors that determine SOM targets */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginTop: '16px' }}>
-            {/* 1. Affinity [B,D] — cosine sim of each image to each feature */}
-            {stepData[StepTensorKey.AFFINITY] && Array.isArray(stepData[StepTensorKey.AFFINITY]) && (
-              <div className="panel" style={{ padding: '12px' }}>
-                <InspectHeatmap
-                  data={stepData[StepTensorKey.AFFINITY] as number[][]}
-                  title="1. Affinity [B,D] (cos sim image-to-feature)"
-                  xLabel="Features (D=64)"
-                  yLabel="Batch (B=128)"
-                  colorScale="viridis"
-                />
+          {/* === IMAGE NEIGHBORHOOD RESCUE DIAGNOSTICS ===
+           * Five components that determine rescue_target for each dead/losing feature.
+           * The question: at which step do the columns of weighted_affinity collapse?
+           *
+           * 1. affinity [B,D]           — Are weights still pointing different directions?
+           * 2. image_coverage [B]        — Are some images actually underserved?
+           * 3. image_need [B]            — Which images are screaming for help?
+           * 4. weighted_affinity [B,D]   — Does multiplying affinity*need produce diverse pull profiles?
+           * 5. rescue_pull [B,D]         — Normalized version. If weighted_affinity cols identical, these identical.
+           */}
+          <div style={{ marginTop: '24px' }}>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#8b949e' }}>
+              Image Neighborhood Rescue — 5 Component Diagnostic
+            </h3>
+            <p style={{ margin: '0 0 12px 0', fontSize: '11px', color: '#6e7681', lineHeight: 1.4 }}>
+              Each column is a feature. If all columns look the same, all features get pulled to the same target.
+              The moment columns of weighted_affinity collapse = convergence is locked in.
+            </p>
+
+            {/* Row 1: Affinity heatmap + bar charts for image_coverage and image_need */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginBottom: '16px' }}>
+              {/* 1. Affinity [B,D] — cosine sim of each image to each feature's weights */}
+              {stepData[StepTensorKey.AFFINITY] && Array.isArray(stepData[StepTensorKey.AFFINITY]) && (
+                <div className="panel" style={{ padding: '12px' }}>
+                  <InspectHeatmap
+                    data={stepData[StepTensorKey.AFFINITY] as number[][]}
+                    title="1. Affinity [B,D] — cos(image, feature weights)"
+                    xLabel="Features (D=64)"
+                    yLabel="Images (B=128)"
+                    colorScale="viridis"
+                  />
+                  <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                    Each column = one feature's affinity profile. Different columns = weights point different directions.
+                  </p>
+                </div>
+              )}
+
+              {/* 2 + 3: Bar charts side by side */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {/* 2. image_coverage [B] — how many features claim each image */}
+                {stepData[StepTensorKey.IMAGE_COVERAGE] && Array.isArray(stepData[StepTensorKey.IMAGE_COVERAGE]) && !Array.isArray((stepData[StepTensorKey.IMAGE_COVERAGE] as unknown[])[0]) && (
+                  <div className="panel" style={{ padding: '12px' }}>
+                    <InspectBarChart
+                      data={stepData[StepTensorKey.IMAGE_COVERAGE] as number[]}
+                      title="2. Image Coverage [B] — features claiming each image"
+                      xLabel="Images (B=128)"
+                      color="#58a6ff"
+                      width={400}
+                      height={60}
+                    />
+                    <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                      Flat = every image has same coverage, no novelty signal. Varied = some images underserved.
+                    </p>
+                  </div>
+                )}
+
+                {/* 3. image_need [B] — 1/(coverage+1), which images need help */}
+                {stepData[StepTensorKey.IMAGE_NEED] && Array.isArray(stepData[StepTensorKey.IMAGE_NEED]) && !Array.isArray((stepData[StepTensorKey.IMAGE_NEED] as unknown[])[0]) && (
+                  <div className="panel" style={{ padding: '12px' }}>
+                    <InspectBarChart
+                      data={stepData[StepTensorKey.IMAGE_NEED] as number[]}
+                      title="3. Image Need [B] — 1/(coverage+1), underservedness"
+                      xLabel="Images (B=128)"
+                      color="#f0883e"
+                      width={400}
+                      height={60}
+                    />
+                    <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                      Should be spiky — a few images with very high need, most with low.
+                    </p>
+                  </div>
+                )}
               </div>
-            )}
-            {/* 4. Weighted Affinity [B,D] — affinity * image_need */}
-            {stepData[StepTensorKey.WEIGHTED_AFFINITY] && Array.isArray(stepData[StepTensorKey.WEIGHTED_AFFINITY]) && (
-              <div className="panel" style={{ padding: '12px' }}>
-                <InspectHeatmap
-                  data={stepData[StepTensorKey.WEIGHTED_AFFINITY] as number[][]}
-                  title="4. Weighted Affinity [B,D] (affinity * need)"
-                  xLabel="Features (D=64)"
-                  yLabel="Batch (B=128)"
-                  colorScale="hot"
-                />
-              </div>
-            )}
-            {/* 5. Rescue Pull [B,D] — sparse normalized pull weights */}
-            {stepData[StepTensorKey.RESCUE_PULL] && Array.isArray(stepData[StepTensorKey.RESCUE_PULL]) && (
-              <div className="panel" style={{ padding: '12px' }}>
-                <InspectHeatmap
-                  data={stepData[StepTensorKey.RESCUE_PULL] as number[][]}
-                  title="5. Rescue Pull [B,D] (top-k sparse, normalized)"
-                  xLabel="Features (D=64)"
-                  yLabel="Batch (B=128)"
-                  colorScale="hot"
-                />
-              </div>
-            )}
+            </div>
+
+            {/* Row 2: Weighted Affinity + Rescue Pull heatmaps side by side */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
+              {/* 4. weighted_affinity [B,D] — affinity * image_need — THE diagnostic */}
+              {stepData[StepTensorKey.WEIGHTED_AFFINITY] && Array.isArray(stepData[StepTensorKey.WEIGHTED_AFFINITY]) && (
+                <div className="panel" style={{ padding: '12px', border: '1px solid #f0883e' }}>
+                  <InspectHeatmap
+                    data={stepData[StepTensorKey.WEIGHTED_AFFINITY] as number[][]}
+                    title="4. Weighted Affinity [B,D] — affinity * image_need"
+                    xLabel="Features (D=64)"
+                    yLabel="Images (B=128)"
+                    colorScale="hot"
+                  />
+                  <p style={{ fontSize: '10px', color: '#f0883e', margin: '4px 0 0 0', fontWeight: 600 }}>
+                    KEY: When all columns look the same, all rescue targets converge. This is THE diagnostic.
+                  </p>
+                </div>
+              )}
+
+              {/* 5. rescue_pull [B,D] — normalized weighted_affinity (top-k sparse) */}
+              {stepData[StepTensorKey.RESCUE_PULL] && Array.isArray(stepData[StepTensorKey.RESCUE_PULL]) && (
+                <div className="panel" style={{ padding: '12px' }}>
+                  <InspectHeatmap
+                    data={stepData[StepTensorKey.RESCUE_PULL] as number[][]}
+                    title="5. Rescue Pull [B,D] — top-k sparse, normalized"
+                    xLabel="Features (D=64)"
+                    yLabel="Images (B=128)"
+                    colorScale="hot"
+                  />
+                  <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                    Normalized version. If weighted_affinity columns were identical, rescue_pull columns are identical.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Weight grids: [D, 784] as 28x28 thumbnails */}
