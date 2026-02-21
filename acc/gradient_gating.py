@@ -780,12 +780,17 @@ class BCL:
         )  # [B, D]
 
         # --- Step 9: Force 2 — Local novelty pull (THE ONLY SOM FORCE) ---
-        # Pull toward images in your neighborhood that your neighbors DON'T
-        # cover well. Each feature's locally-novel images are different because
-        # each feature has different neighbors.
-        local_pull = (
-            rank_score * local_novelty * in_nbr * som_weight_d.unsqueeze(0)
-        )  # [B, D]
+        # Two pull modes blended by effective_win:
+        #   Winners/contenders: pull toward images you WIN that are locally novel.
+        #     This is sub-specialization — eat the scraps your neighbors leave.
+        #   Losers: pull toward locally novel images regardless of activation.
+        #     You don't need to respond to an image to move toward it.
+        #     You just need it to be uncovered in your neighborhood.
+        ew = effective_win.unsqueeze(0)  # [1, D]
+        winner_pull = rank_score * local_novelty * in_nbr  # [B, D]
+        loser_pull = local_novelty * in_nbr  # [B, D]
+        local_pull = ew * winner_pull + (1.0 - ew) * loser_pull  # [B, D]
+
         # Diagnostic: raw pull signal per feature BEFORE normalization.
         # If this drops to zero, the feature is losing its SOM lifeline.
         local_pull_raw_sum = local_pull.sum(dim=0)  # [D]
