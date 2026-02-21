@@ -802,9 +802,8 @@ class BCL:
         )  # [B, 784]
         affinity = (X_norm @ W_norm.T).clamp(min=0)  # [B, D] non-negative only
 
-        # Weight affinity by how underserved each image is
-        image_need = 1.0 / (image_coverage + 1.0)  # [B]
-        rescue_pull = affinity * image_need.unsqueeze(1)  # [B, D]
+        # Pure affinity — pull toward images you're geometrically closest to
+        rescue_pull = affinity  # [B, D]
 
         # Normalize per feature into pull weights
         rescue_pull_sum = rescue_pull.sum(dim=0)  # [D] — diagnostic
