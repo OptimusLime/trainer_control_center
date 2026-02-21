@@ -779,34 +779,54 @@ class BCL:
             rank_score * feature_novelty.unsqueeze(0) * gradient_weight.unsqueeze(0)
         )  # [B, D]
 
-        # --- Step 9: Force 2 — Local novelty pull (THE ONLY SOM FORCE) ---
-        # Two pull modes blended by effective_win:
-        #   Winners/contenders: pull toward images you WIN that are locally novel.
-        #     This is sub-specialization — eat the scraps your neighbors leave.
-        #   Losers: pull toward locally novel images regardless of activation.
-        #     You don't need to respond to an image to move toward it.
-        #     You just need it to be uncovered in your neighborhood.
-        ew = effective_win.unsqueeze(0)  # [1, D]
+        # --- Step 9a: Winner pull — sub-specialize on locally novel wins ---
         winner_pull = rank_score * local_novelty * in_nbr  # [B, D]
-        loser_pull = local_novelty * in_nbr  # [B, D]
-        local_pull = ew * winner_pull + (1.0 - ew) * loser_pull  # [B, D]
+        winner_pull_sum = winner_pull.sum(dim=0)  # [D]
+        winner_norm = winner_pull_sum.unsqueeze(0) + 1e-8
+        winner_pull = winner_pull / winner_norm
+        winner_target = winner_pull.T @ layer_input  # [D, in_features]
 
-        # Diagnostic: raw pull signal per feature BEFORE normalization.
-        # If this drops to zero, the feature is losing its SOM lifeline.
-        local_pull_raw_sum = local_pull.sum(dim=0)  # [D]
-        local_norm = local_pull_raw_sum.unsqueeze(0) + 1e-8
-        local_pull = local_pull / local_norm
-        local_target = local_pull.T @ layer_input  # [D, in_features]
+        # --- Step 9b: Image neighborhood rescue (for dead/losing features) ---
+        # Every feature has a weight vector pointing somewhere in 784-dim space.
+        # Which images are closest to where you already point?
+        # And which of THOSE images are underserved (nobody wins them)?
+        # The intersection = your image neighborhood. That's where you should go.
+        #
+        # Different dead features get pulled toward DIFFERENT images
+        # because their weight vectors point in different directions.
+        # Symmetry broken by initialization geometry.
+        W = module.weight.detach()  # [D, 784]
+        W_norm = W / (W.norm(dim=1, keepdim=True) + 1e-8)  # [D, 784]
+        X_norm = layer_input / (
+            layer_input.norm(dim=1, keepdim=True) + 1e-8
+        )  # [B, 784]
+        affinity = X_norm @ W_norm.T  # [B, D]
 
-        # local_target IS the SOM target — no blending with global force
-        som_targets = local_target  # [D, in_features]
+        # Weight affinity by how underserved each image is
+        image_need = 1.0 / (image_coverage + 1.0)  # [B]
+        rescue_pull = affinity * image_need.unsqueeze(1)  # [B, D]
+
+        # Normalize per feature into pull weights
+        rescue_pull_sum = rescue_pull.sum(dim=0)  # [D] — diagnostic
+        rescue_norm = rescue_pull_sum.unsqueeze(0) + 1e-8
+        rescue_pull = rescue_pull / rescue_norm  # [B, D]
+        rescue_target = rescue_pull.T @ layer_input  # [D, 784]
+
+        # --- Step 10: Blend winner pull + rescue pull ---
+        ew = effective_win.unsqueeze(1)  # [D, 1]
+        som_targets = ew * winner_target + (1.0 - ew) * rescue_target  # [D, 784]
+
+        # Diagnostic: combined pull signal per feature BEFORE normalization
+        local_pull_raw_sum = (
+            effective_win * winner_pull_sum + (1.0 - effective_win) * rescue_pull_sum
+        )  # [D]
 
         # --- Store metrics for this step ---
         self._last_metrics = {
             "rank_score": rank_score.detach(),  # [B, D]
             "feature_novelty": feature_novelty.detach(),  # [D]
             "grad_mask": grad_mask.detach(),  # [B, D]
-            "som_weight": local_pull.detach(),  # [B, D] — normalized pull weights
+            "som_weight": rescue_pull.detach(),  # [B, D] — normalized rescue pull weights
             "strength": strength.detach(),  # [B, D]
             "in_nbr": in_nbr.detach(),  # [B, D]
             "gradient_weight": gradient_weight.detach(),  # [D]
@@ -817,7 +837,7 @@ class BCL:
             "neighbors": neighbors.detach(),  # [D, k]
             "local_coverage": local_coverage.detach(),  # [B, D]
             "local_novelty": local_novelty.detach(),  # [B, D]
-            "local_target": local_target.detach(),  # [D, in_features]
+            "local_target": rescue_target.detach(),  # [D, in_features] — rescue target
             "som_targets": som_targets.detach(),  # [D, in_features]
         }
 
