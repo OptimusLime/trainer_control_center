@@ -1668,9 +1668,13 @@ class TrainerAPI:
             )
 
             # Attach BCL
-            som_lr = {"bcl-slow": 0.001, "bcl-med": 0.005, "bcl-fast": 0.01}.get(
-                condition, 0.005
-            )
+            som_lr = {
+                "bcl-micro": 0.0001,
+                "bcl-tiny": 0.0003,
+                "bcl-slow": 0.001,
+                "bcl-med": 0.005,
+                "bcl-fast": 0.01,
+            }.get(condition, 0.005)
             bcl_config = BCLConfig(
                 neighborhood_k=8,
                 temperature=5.0,

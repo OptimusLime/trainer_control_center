@@ -23,7 +23,7 @@ import InspectHeatmap from './InspectHeatmap';
 import InspectWeightGrid from './InspectWeightGrid';
 import { useEffect, useState } from 'react';
 
-const CONDITIONS = ['bcl-slow', 'bcl-med', 'bcl-fast'] as const;
+const CONDITIONS = ['bcl-micro', 'bcl-tiny', 'bcl-slow', 'bcl-med', 'bcl-fast'] as const;
 const DEFAULT_CONDITION = 'bcl-slow';
 
 export default function InspectPanel() {
