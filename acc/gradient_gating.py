@@ -766,13 +766,14 @@ class BCL:
         local_coverage = neighbor_rank_scores.sum(dim=2)  # [B, D]
         local_novelty = 1.0 / (local_coverage + 1.0)  # [B, D]
 
-        # --- Step 7: Win rate + blending weights ---
+        # --- Step 7: Win rate + decoupled force weights ---
+        # Gradient and SOM have separate jobs and separate modulation:
+        #   Gradient: "did you win?" → rank_score is the mask. No novelty needed.
+        #   SOM: "are you redundant?" → (1 - feature_novelty) is the strength.
+        # They don't share effective_win — that was crushing the gradient.
         win_rate = rank_score.mean(dim=0)  # [D]
-        effective_win = (
-            win_rate * feature_novelty
-        )  # [D] — high only if winning AND unique
-        gradient_weight = effective_win  # [D] — unique winners get gradient
-        som_weight_d = 1.0 - effective_win  # [D] — everyone else gets local SOM pull
+        gradient_weight = win_rate  # [D] — diagnostic only (not used in grad_mask)
+        som_weight_d = 1.0 - feature_novelty  # [D] — redundant features get SOM pull
 
         # --- Shared: in_neighborhood mask ---
         winners_per_image = rank_score.argmax(dim=1)  # [B]
@@ -780,10 +781,11 @@ class BCL:
         in_nbr = torch.zeros(B, D, device=act.device)
         in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
 
-        # --- Step 8: Force 1 — Gradient (unique winners get strong gradient) ---
-        grad_mask = (
-            rank_score * feature_novelty.unsqueeze(0) * gradient_weight.unsqueeze(0)
-        )  # [B, D]
+        # --- Step 8: Force 1 — Gradient (winners get gradient, period) ---
+        # Did you win this image in your neighborhood? You get the loss signal.
+        # No novelty modulation. The winner of a crowded niche still needs to
+        # get better at reconstruction — the loss doesn't care about diversity.
+        grad_mask = rank_score  # [B, D]
 
         # --- Step 9a: Winner pull — sub-specialize on locally novel wins ---
         winner_pull = rank_score * local_novelty * in_nbr  # [B, D]
@@ -843,12 +845,16 @@ class BCL:
         rescue_target = rescue_pull.T @ layer_input  # [D, 784]
 
         # --- Step 10: Blend winner pull + rescue pull ---
-        ew = effective_win.unsqueeze(1)  # [D, 1]
-        som_targets = ew * winner_target + (1.0 - ew) * rescue_target  # [D, 784]
+        # Winner/rescue blend uses win_rate: if you win images, your SOM target
+        # comes from those won images. If you don't win, rescue picks your target.
+        # SOM overall strength uses som_weight_d = (1 - feature_novelty):
+        # redundant features get strong repositioning, unique features get left alone.
+        wr = win_rate.unsqueeze(1)  # [D, 1]
+        som_targets = wr * winner_target + (1.0 - wr) * rescue_target  # [D, 784]
 
         # Diagnostic: combined pull signal per feature BEFORE normalization
         local_pull_raw_sum = (
-            effective_win * winner_pull_sum + (1.0 - effective_win) * rescue_pull_sum
+            win_rate * winner_pull_sum + (1.0 - win_rate) * rescue_pull_sum
         )  # [D]
 
         # --- Store metrics for this step ---
@@ -880,19 +886,22 @@ class BCL:
         # Capture everything by value for the closure
         _mask = grad_mask.detach()
         _som_targets = som_targets.detach()
+        _som_weight_d = som_weight_d.detach()  # [D] — per-feature SOM strength
         _som_lr = cfg.som_lr
         _module = module
         _metrics_ref = self._last_metrics  # write-back ref for som_delta
 
         def backward_hook(grad: torch.Tensor) -> torch.Tensor:
-            # SOM update for losers (safe: grad already computed from unmodified weights)
+            # SOM update: redundant features get strong pull, unique ones get weak pull
+            # som_weight_d = (1 - feature_novelty): high for redundant, low for unique
             with torch.no_grad():
-                som_delta = _som_lr * (_som_targets - _module.weight)
+                raw_delta = _som_targets - _module.weight  # [D, 784]
+                som_delta = _som_lr * _som_weight_d.unsqueeze(1) * raw_delta
                 _module.weight += som_delta
                 # Store som_delta for inspector capture
                 if _metrics_ref is not None:
                     _metrics_ref["som_delta"] = som_delta.detach()
-            # Gradient mask for winners
+            # Gradient mask for winners — rank_score only, no novelty suppression
             return grad * _mask
 
         output.register_hook(backward_hook)
