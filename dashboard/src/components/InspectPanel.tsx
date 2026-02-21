@@ -63,9 +63,21 @@ export default function InspectPanel() {
 
   return (
     <div style={{ padding: '16px' }}>
-      {/* Header with condition switcher */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-        <h2 style={{ margin: 0 }}>Step Inspector</h2>
+      {/* Sticky toolbar: condition switcher + step controls + info */}
+      <div style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 20,
+        background: 'var(--bg-primary, #0d1117)',
+        borderBottom: '1px solid var(--border, #30363d)',
+        padding: '8px 0 8px 0',
+        marginBottom: '16px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '12px',
+        flexWrap: 'wrap',
+      }}>
+        <h2 style={{ margin: 0, fontSize: '16px' }}>Inspector</h2>
         <select
           value={selectedCondition}
           onChange={(e) => handleConditionChange(e.target.value)}
@@ -83,70 +95,55 @@ export default function InspectPanel() {
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
+        {isActive && !isLoading && (
+          <>
+            <button
+              className="btn-action btn-train-start"
+              onClick={() => stepInspector(1)}
+              disabled={stepLoading}
+              style={{ padding: '4px 12px', fontSize: '13px' }}
+            >
+              {stepLoading ? 'Stepping...' : 'Step'}
+            </button>
+            <button
+              className="btn-action"
+              onClick={() => stepInspector(10)}
+              disabled={stepLoading}
+              style={{ padding: '4px 10px', fontSize: '13px' }}
+            >
+              {stepLoading ? '...' : 'x10'}
+            </button>
+            <button
+              className="btn-action"
+              onClick={() => stepInspector(50)}
+              disabled={stepLoading}
+              style={{ padding: '4px 10px', fontSize: '13px' }}
+            >
+              {stepLoading ? '...' : 'x50'}
+            </button>
+            <span style={{ color: '#8b949e', fontSize: '12px' }}>
+              Step <strong style={{ color: '#e6edf3' }}>{currentStep >= 0 ? currentStep : state.step}</strong>
+            </span>
+            {loss !== undefined && (
+              <span style={{ color: '#8b949e', fontSize: '12px' }}>
+                Loss <strong style={{ color: '#e6edf3' }}>{loss.toFixed(4)}</strong>
+              </span>
+            )}
+            {winRate && (
+              <span style={{ color: '#8b949e', fontSize: '12px' }}>
+                Alive <strong style={{ color: '#e6edf3' }}>{winRate.filter(w => w > 0.01).length}/64</strong>
+              </span>
+            )}
+          </>
+        )}
         {isLoading && (
           <span className="text-muted" style={{ fontSize: '13px' }}>Setting up...</span>
         )}
-        {isActive && !isLoading && (
-          <span className="recipe-state" style={{ color: '#3fb950', fontSize: '13px' }}>
-            Ready &middot; Step {state.step}
-          </span>
-        )}
       </div>
-
-      {/* Step controls */}
-      {isActive && !isLoading && (
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-          <button
-            className="btn-action btn-train-start"
-            onClick={() => stepInspector(1)}
-            disabled={stepLoading}
-          >
-            {stepLoading ? 'Stepping...' : 'Step'}
-          </button>
-          <button
-            className="btn-action"
-            onClick={() => stepInspector(10)}
-            disabled={stepLoading}
-          >
-            {stepLoading ? '...' : 'Step x10'}
-          </button>
-          <button
-            className="btn-action"
-            onClick={() => stepInspector(50)}
-            disabled={stepLoading}
-          >
-            {stepLoading ? '...' : 'Step x50'}
-          </button>
-        </div>
-      )}
 
       {/* Step data display */}
       {isActive && stepData && (
         <div>
-          {/* Loss + step info bar */}
-          <div className="panel" style={{ marginBottom: '12px', padding: '12px' }}>
-            <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-              <div>
-                <span className="text-muted">Step</span>{' '}
-                <strong>{currentStep}</strong>
-              </div>
-              <div>
-                <span className="text-muted">Loss</span>{' '}
-                <strong>{loss !== undefined ? loss.toFixed(6) : '--'}</strong>
-              </div>
-              <div>
-                <span className="text-muted">Keys</span>{' '}
-                <span>{(stepData._keys as string[])?.length ?? 0} tensors captured</span>
-              </div>
-              {winRate && (
-                <div>
-                  <span className="text-muted">Alive features</span>{' '}
-                  <strong>{winRate.filter(w => w > 0.01).length}/64</strong>
-                </div>
-              )}
-            </div>
-          </div>
-
           {/* Timeline / history slider */}
           {history.length > 1 && (
             <div className="panel" style={{ marginBottom: '12px', padding: '12px' }}>
