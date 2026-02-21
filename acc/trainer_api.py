@@ -33,6 +33,7 @@ from acc.recipes.registry import RecipeRegistry
 from acc.tasks.registry import TaskRegistry
 from acc.generators.registry import GeneratorRegistry
 from acc.loss_health import compute_loss_summary
+from acc.step_inspector import StepInspector, StepTensorKey
 
 
 class TrainerAPI:
@@ -68,6 +69,11 @@ class TrainerAPI:
         self.generator_registry = GeneratorRegistry()
         self.generator_registry.start_watcher()  # Hot-reload generators on file change
 
+        # Step inspector state (M-DBG-1)
+        self._inspector: Optional[StepInspector] = None
+        self._inspector_bcl: Optional[object] = None  # BCL instance for teardown
+        self._inspector_condition: Optional[str] = None
+
         self._register_routes()
 
     def _is_model_busy(self) -> bool:
@@ -84,6 +90,8 @@ class TrainerAPI:
         rj = self.recipe_runner.current()
         if rj is not None and rj.state == "running":
             return True
+        if self._inspector is not None:
+            return True
         return False
 
     def _training_guard(self) -> Optional[JSONResponse]:
@@ -99,7 +107,9 @@ class TrainerAPI:
         """
         if self._is_model_busy():
             return JSONResponse(
-                {"error": "Model is busy (training or recipe running). Eval endpoints are disabled."},
+                {
+                    "error": "Model is busy (training or recipe running). Eval endpoints are disabled."
+                },
                 status_code=409,
             )
         return None
@@ -150,7 +160,9 @@ class TrainerAPI:
         @app.post("/model/create")
         async def model_create():
             return JSONResponse(
-                {"error": "Model creation via API not yet implemented. Use Python code."},
+                {
+                    "error": "Model creation via API not yet implemented. Use Python code."
+                },
                 status_code=501,
             )
 
@@ -163,7 +175,9 @@ class TrainerAPI:
         async def dataset_sample(name: str, n: int = 8):
             ds = self.datasets.get(name)
             if ds is None:
-                return JSONResponse({"error": f"Dataset '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Dataset '{name}' not found"}, status_code=404
+                )
             samples = ds.sample(n)
             images_b64 = []
             for i in range(samples.shape[0]):
@@ -182,7 +196,9 @@ class TrainerAPI:
                 ds = load_mnist(image_size=image_size)
                 self.datasets[ds.name] = ds
                 return ds.describe()
-            return JSONResponse({"error": f"Unknown builtin dataset: {name}"}, status_code=400)
+            return JSONResponse(
+                {"error": f"Unknown builtin dataset: {name}"}, status_code=400
+            )
 
         # -- Tasks --
         @app.get("/tasks")
@@ -209,11 +225,15 @@ class TrainerAPI:
 
             dataset = self.datasets.get(dataset_name)
             if dataset is None:
-                return JSONResponse({"error": f"Dataset '{dataset_name}' not found"}, status_code=400)
+                return JSONResponse(
+                    {"error": f"Dataset '{dataset_name}' not found"}, status_code=400
+                )
 
             task_class = self.task_registry.get(class_name)
             if task_class is None:
-                return JSONResponse({"error": f"Unknown task class: {class_name}"}, status_code=400)
+                return JSONResponse(
+                    {"error": f"Unknown task class: {class_name}"}, status_code=400
+                )
 
             # Parse optional latent_slice (e.g. "0:4" -> (0, 4))
             latent_slice = None
@@ -223,7 +243,9 @@ class TrainerAPI:
                 latent_slice = (int(parts[0]), int(parts[1]))
 
             try:
-                task = task_class(task_name, dataset, weight=weight, latent_slice=latent_slice)
+                task = task_class(
+                    task_name, dataset, weight=weight, latent_slice=latent_slice
+                )
                 task.attach(self.autoencoder)
             except TaskError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
@@ -236,7 +258,9 @@ class TrainerAPI:
         async def toggle_task(name: str):
             task = self.tasks.get(name)
             if task is None:
-                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Task '{name}' not found"}, status_code=404
+                )
             task.enabled = not task.enabled
             return {"name": name, "enabled": task.enabled}
 
@@ -244,11 +268,15 @@ class TrainerAPI:
         async def set_task_weight(name: str, request: Request):
             task = self.tasks.get(name)
             if task is None:
-                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Task '{name}' not found"}, status_code=404
+                )
             data = await request.json()
             weight = data.get("weight")
             if weight is None:
-                return JSONResponse({"error": "Missing 'weight' field"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Missing 'weight' field"}, status_code=400
+                )
             task.weight = float(weight)
             return task.describe()
 
@@ -259,7 +287,9 @@ class TrainerAPI:
                 return guard
             task = self.tasks.pop(name, None)
             if task is None:
-                return JSONResponse({"error": f"Task '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Task '{name}' not found"}, status_code=404
+                )
             self._rebuild_trainer()
             return {"removed": name}
 
@@ -324,7 +354,9 @@ class TrainerAPI:
                     "total_steps": j.total_steps,
                     "current_step": j.current_step,
                     "started_at": j.started_at.isoformat(),
-                    "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+                    "completed_at": j.completed_at.isoformat()
+                    if j.completed_at
+                    else None,
                 }
                 # Per-task final losses with health (last loss entry for each task)
                 final_losses = {}
@@ -353,7 +385,9 @@ class TrainerAPI:
         async def get_job(job_id: str):
             job = self.jobs.get(job_id)
             if job is None:
-                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Job '{job_id}' not found"}, status_code=404
+                )
             return job.to_dict()
 
         @app.get("/jobs/{job_id}/loss_history")
@@ -367,7 +401,9 @@ class TrainerAPI:
             """
             job = self.jobs.get(job_id)
             if job is None:
-                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Job '{job_id}' not found"}, status_code=404
+                )
 
             losses = job.losses
             if len(losses) <= max_points:
@@ -376,6 +412,7 @@ class TrainerAPI:
             # Group by task_name, downsample each, merge back in step order.
             # Always preserve entries with training_metrics (sparse, high-value).
             from collections import defaultdict
+
             by_task: dict[str, list[dict]] = defaultdict(list)
             metrics_entries = []
             for entry in losses:
@@ -414,14 +451,19 @@ class TrainerAPI:
             """
             job = self.jobs.get(job_id)
             if job is None:
-                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Job '{job_id}' not found"}, status_code=404
+                )
             losses = job.losses
             if not losses:
                 return JSONResponse({"error": "No losses yet"}, status_code=404)
             try:
                 entry = losses[index]
             except IndexError:
-                return JSONResponse({"error": f"Index {index} out of range (have {len(losses)})"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Index {index} out of range (have {len(losses)})"},
+                    status_code=404,
+                )
             return {
                 **entry,
                 "n_total_losses": len(losses),
@@ -444,7 +486,9 @@ class TrainerAPI:
             """Per-task loss summary with health classification for a job."""
             job = self.jobs.get(job_id)
             if job is None:
-                return JSONResponse({"error": f"Job '{job_id}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Job '{job_id}' not found"}, status_code=404
+                )
             summaries = compute_loss_summary(job.losses)
             return {name: s.to_dict() for name, s in summaries.items()}
 
@@ -482,21 +526,32 @@ class TrainerAPI:
             guard = self._training_guard()
             if guard is not None:
                 return guard
-            if self.trainer is None or self.autoencoder is None or self.checkpoints is None:
-                return JSONResponse({"error": "No trainer/model/checkpoint store"}, status_code=400)
+            if (
+                self.trainer is None
+                or self.autoencoder is None
+                or self.checkpoints is None
+            ):
+                return JSONResponse(
+                    {"error": "No trainer/model/checkpoint store"}, status_code=400
+                )
 
             data = await request.json()
             cp_id = data.get("checkpoint_id")
             if not cp_id:
-                return JSONResponse({"error": "Missing 'checkpoint_id'"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Missing 'checkpoint_id'"}, status_code=400
+                )
 
             # Save current state to a temp buffer (deep copy to avoid mutation)
             import copy
+
             original_state = copy.deepcopy(self.trainer.state_dict())
 
             try:
                 # Load the target checkpoint
-                cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer, device=self.device)
+                cp = self.checkpoints.load(
+                    cp_id, self.autoencoder, self.trainer, device=self.device
+                )
                 # Run eval
                 results = self.trainer.evaluate_all()
                 return {
@@ -553,12 +608,14 @@ class TrainerAPI:
             for cp in all_cps:
                 if cp.parent_id == parent_id:
                     eval_results = cp.metrics.get("eval_results", {})
-                    siblings.append({
-                        "id": cp.id,
-                        "tag": cp.tag,
-                        "description": cp.description,
-                        "eval_results": eval_results,
-                    })
+                    siblings.append(
+                        {
+                            "id": cp.id,
+                            "tag": cp.tag,
+                            "description": cp.description,
+                            "eval_results": eval_results,
+                        }
+                    )
 
             return {"siblings": siblings, "current_id": current_id}
 
@@ -587,22 +644,30 @@ class TrainerAPI:
                 return JSONResponse({"error": "No model loaded"}, status_code=400)
 
             image_shape = None
-            if hasattr(self.autoencoder, '_image_shape') and self.autoencoder._image_shape:
+            if (
+                hasattr(self.autoencoder, "_image_shape")
+                and self.autoencoder._image_shape
+            ):
                 image_shape = self.autoencoder._image_shape
             if image_shape is None:
-                return JSONResponse({"error": "Model has no image_shape"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Model has no image_shape"}, status_code=400
+                )
 
             import numpy as np
+
             flat_dim = 1
             for d in image_shape:
                 flat_dim *= d
-            spatial = image_shape[1:] if len(image_shape) == 3 else image_shape  # (H, W)
+            spatial = (
+                image_shape[1:] if len(image_shape) == 3 else image_shape
+            )  # (H, W)
 
             result = {}
             for name, module in self.autoencoder.named_modules():
                 if layer_name and name != layer_name:
                     continue
-                if not hasattr(module, 'weight'):
+                if not hasattr(module, "weight"):
                     continue
                 w = module.weight.detach().cpu()
                 # Check if weight rows match flattened image dim
@@ -644,21 +709,33 @@ class TrainerAPI:
                 "image_shape": [28, 28]
             }
             """
-            if self.autoencoder is None or self.trainer is None or self.checkpoints is None:
-                return JSONResponse({"error": "No model/trainer/checkpoints"}, status_code=400)
+            if (
+                self.autoencoder is None
+                or self.trainer is None
+                or self.checkpoints is None
+            ):
+                return JSONResponse(
+                    {"error": "No model/trainer/checkpoints"}, status_code=400
+                )
 
             guard = self._training_guard()
             if guard is not None:
                 return guard
 
             image_shape = None
-            if hasattr(self.autoencoder, '_image_shape') and self.autoencoder._image_shape:
+            if (
+                hasattr(self.autoencoder, "_image_shape")
+                and self.autoencoder._image_shape
+            ):
                 image_shape = self.autoencoder._image_shape
             if image_shape is None:
-                return JSONResponse({"error": "Model has no image_shape"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Model has no image_shape"}, status_code=400
+                )
 
             import numpy as np
             import copy
+
             flat_dim = 1
             for d in image_shape:
                 flat_dim *= d
@@ -666,7 +743,12 @@ class TrainerAPI:
 
             current_id = self.checkpoints.current_id
             if not current_id:
-                return {"siblings": [], "current_id": None, "n_features": 0, "image_shape": list(spatial)}
+                return {
+                    "siblings": [],
+                    "current_id": None,
+                    "n_features": 0,
+                    "image_shape": list(spatial),
+                }
 
             # Find siblings
             all_cps = self.checkpoints.tree()
@@ -676,11 +758,21 @@ class TrainerAPI:
                     current_cp = cp
                     break
             if current_cp is None:
-                return {"siblings": [], "current_id": current_id, "n_features": 0, "image_shape": list(spatial)}
+                return {
+                    "siblings": [],
+                    "current_id": current_id,
+                    "n_features": 0,
+                    "image_shape": list(spatial),
+                }
 
             sibling_cps = [cp for cp in all_cps if cp.parent_id == current_cp.parent_id]
             if len(sibling_cps) < 2:
-                return {"siblings": [], "current_id": current_id, "n_features": 0, "image_shape": list(spatial)}
+                return {
+                    "siblings": [],
+                    "current_id": current_id,
+                    "n_features": 0,
+                    "image_shape": list(spatial),
+                }
 
             # Save current state
             original_state = copy.deepcopy(self.trainer.state_dict())
@@ -691,12 +783,14 @@ class TrainerAPI:
             try:
                 for cp in sibling_cps:
                     # Load checkpoint
-                    self.checkpoints.load(cp.id, self.autoencoder, self.trainer, device=self.device)
+                    self.checkpoints.load(
+                        cp.id, self.autoencoder, self.trainer, device=self.device
+                    )
 
                     # Extract features from target layer
                     named = dict(self.autoencoder.named_modules())
                     module = named.get(layer_name)
-                    if module is None or not hasattr(module, 'weight'):
+                    if module is None or not hasattr(module, "weight"):
                         continue
                     w = module.weight.detach().cpu()
                     if w.ndim != 2 or w.shape[1] != flat_dim:
@@ -712,12 +806,14 @@ class TrainerAPI:
                             row = torch.zeros_like(row) + 0.5
                         features.append(_tensor_to_base64(row.unsqueeze(0)))
                     n_features = w.shape[0]
-                    siblings.append({
-                        "id": cp.id,
-                        "tag": cp.tag,
-                        "description": cp.description,
-                        "features": features,
-                    })
+                    siblings.append(
+                        {
+                            "id": cp.id,
+                            "tag": cp.tag,
+                            "description": cp.description,
+                            "features": features,
+                        }
+                    )
             finally:
                 # Restore original state
                 self.trainer.load_state_dict(original_state)
@@ -756,10 +852,12 @@ class TrainerAPI:
                  "n_features": 64, "image_shape": [28, 28],
                  "features": ["base64...", ...]}
             """
-            recorders = getattr(self, 'snapshot_recorders', None)
+            recorders = getattr(self, "snapshot_recorders", None)
             if not recorders:
                 return JSONResponse(
-                    {"error": "No snapshot recorders available. Run a gated recipe first."},
+                    {
+                        "error": "No snapshot recorders available. Run a gated recipe first."
+                    },
                     status_code=404,
                 )
 
@@ -770,7 +868,9 @@ class TrainerAPI:
             recorder = recorders.get(tag)
             if recorder is None:
                 return JSONResponse(
-                    {"error": f"No snapshots for tag '{tag}'. Available: {list(recorders.keys())}"},
+                    {
+                        "error": f"No snapshots for tag '{tag}'. Available: {list(recorders.keys())}"
+                    },
                     status_code=404,
                 )
 
@@ -800,9 +900,7 @@ class TrainerAPI:
             return {
                 "tag": tag,
                 "step": step,
-                "event": next(
-                    (e for s, e, _ in recorder.snapshots if s == step), ""
-                ),
+                "event": next((e for s, e, _ in recorder.snapshots if s == step), ""),
                 "n_features": feature_images.shape[0],
                 "image_shape": list(recorder.image_shape),
                 "features": features_b64,
@@ -828,7 +926,7 @@ class TrainerAPI:
             Returns (mode=diversity):
                 {"tag": "bcl-med", "entries": [{step, mean_similarity}, ...]}
             """
-            trackers = getattr(self, 'bcl_trackers', None)
+            trackers = getattr(self, "bcl_trackers", None)
             if not trackers:
                 return JSONResponse(
                     {"error": "No BCL trackers available. Run a BCL recipe first."},
@@ -841,7 +939,9 @@ class TrainerAPI:
             tracker = trackers.get(tag)
             if tracker is None:
                 return JSONResponse(
-                    {"error": f"No BCL data for tag '{tag}'. Available: {list(trackers.keys())}"},
+                    {
+                        "error": f"No BCL data for tag '{tag}'. Available: {list(trackers.keys())}"
+                    },
                     status_code=404,
                 )
 
@@ -897,9 +997,12 @@ class TrainerAPI:
         @app.post("/checkpoints/save")
         async def save_checkpoint(request: Request):
             if self.autoencoder is None or self.trainer is None:
-                return JSONResponse({"error": "No model/trainer loaded"}, status_code=400)
+                return JSONResponse(
+                    {"error": "No model/trainer loaded"}, status_code=400
+                )
             if self.checkpoints is None:
                 from acc.checkpoints import CheckpointStore
+
                 self.checkpoints = CheckpointStore("./acc/checkpoints_data")
             data = await request.json() if await request.body() else {}
             tag = data.get("tag", "checkpoint")
@@ -915,7 +1018,9 @@ class TrainerAPI:
                     metrics["loss_history"] = j.losses
                     break
             cp = self.checkpoints.save(
-                self.autoencoder, self.trainer, tag=tag,
+                self.autoencoder,
+                self.trainer,
+                tag=tag,
                 description="Manual save from dashboard",
                 metrics=metrics,
             )
@@ -931,25 +1036,34 @@ class TrainerAPI:
                 or self.trainer is None
                 or self.checkpoints is None
             ):
-                return JSONResponse({"error": "No model/trainer/checkpoint store"}, status_code=400)
+                return JSONResponse(
+                    {"error": "No model/trainer/checkpoint store"}, status_code=400
+                )
             data = await request.json()
             cp_id = data.get("id")
             if not cp_id:
                 return JSONResponse({"error": "Missing checkpoint id"}, status_code=400)
             try:
-                cp = self.checkpoints.load(cp_id, self.autoencoder, self.trainer, device=self.device)
+                cp = self.checkpoints.load(
+                    cp_id, self.autoencoder, self.trainer, device=self.device
+                )
                 cp_dict = cp.to_dict()
                 # Inject checkpoint's stored loss history as a synthetic job
                 # so the dashboard can show loss curves for this checkpoint
                 loss_history = cp_dict.get("metrics", {}).get("loss_history")
                 if loss_history:
                     from acc.jobs import JobInfo
+
                     syn_id = f"cp-{cp_id[:8]}"
                     job = JobInfo(
                         id=syn_id,
                         state="completed",
-                        total_steps=max((e.get("step", 0) for e in loss_history), default=0),
-                        current_step=max((e.get("step", 0) for e in loss_history), default=0),
+                        total_steps=max(
+                            (e.get("step", 0) for e in loss_history), default=0
+                        ),
+                        current_step=max(
+                            (e.get("step", 0) for e in loss_history), default=0
+                        ),
                         task_names=list({e["task_name"] for e in loss_history}),
                         losses=loss_history,
                         started_at=datetime.fromisoformat(cp_dict["timestamp"]),
@@ -1028,7 +1142,9 @@ class TrainerAPI:
 
             generator = self.generator_registry.get(gen_name)
             if generator is None:
-                return JSONResponse({"error": f"Generator '{gen_name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Generator '{gen_name}' not found"}, status_code=404
+                )
 
             try:
                 dataset = generator.generate(**params)
@@ -1036,7 +1152,9 @@ class TrainerAPI:
                 self.datasets[dataset.name] = dataset
                 return dataset.describe()
             except Exception as e:
-                return JSONResponse({"error": f"Generation failed: {e}"}, status_code=500)
+                return JSONResponse(
+                    {"error": f"Generation failed: {e}"}, status_code=500
+                )
 
         # -- Recipes --
         # Static routes MUST come before parameterized {name} routes
@@ -1061,14 +1179,18 @@ class TrainerAPI:
         async def get_recipe(name: str):
             recipe = self.recipe_registry.get(name)
             if recipe is None:
-                return JSONResponse({"error": f"Recipe '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Recipe '{name}' not found"}, status_code=404
+                )
             return {"name": recipe.name, "description": recipe.description}
 
         @app.post("/recipes/{name}/run")
         async def run_recipe(name: str):
             recipe = self.recipe_registry.get(name)
             if recipe is None:
-                return JSONResponse({"error": f"Recipe '{name}' not found"}, status_code=404)
+                return JSONResponse(
+                    {"error": f"Recipe '{name}' not found"}, status_code=404
+                )
             try:
                 job = self.recipe_runner.start(recipe, self)
                 return job.to_dict()
@@ -1194,8 +1316,10 @@ class TrainerAPI:
                     has_spatial = hasattr(model, "latent_channels")
                     if has_spatial:
                         z_spatial = z_flat.view(
-                            n_seeds, model.latent_channels,
-                            model._spatial_size, model._spatial_size,
+                            n_seeds,
+                            model.latent_channels,
+                            model._spatial_size,
+                            model._spatial_size,
                         )
 
                     result = {}
@@ -1206,25 +1330,43 @@ class TrainerAPI:
                             if has_spatial:
                                 # Vary channel group in spatial z
                                 z_seed = z_spatial[seed_idx].clone()  # (C, h, w)
-                                ch_slice = z_spatial[:, fg.latent_start:fg.latent_end]  # (B, fg_ch, h, w)
+                                ch_slice = z_spatial[
+                                    :, fg.latent_start : fg.latent_end
+                                ]  # (B, fg_ch, h, w)
                                 fg_mean = ch_slice.mean(dim=0)  # (fg_ch, h, w)
                                 fg_std = ch_slice.std(dim=0).clamp(min=0.1)
                                 for step_i in range(n_steps):
-                                    alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                                    alpha = -range_val + (2 * range_val) * step_i / (
+                                        n_steps - 1
+                                    )
                                     z_mod = z_seed.clone().unsqueeze(0)  # (1, C, h, w)
-                                    z_mod[0, fg.latent_start:fg.latent_end] = fg_mean + alpha * fg_std
-                                    z_mod_flat = z_mod.flatten(1)  # (1, total_latent_dim)
+                                    z_mod[0, fg.latent_start : fg.latent_end] = (
+                                        fg_mean + alpha * fg_std
+                                    )
+                                    z_mod_flat = z_mod.flatten(
+                                        1
+                                    )  # (1, total_latent_dim)
                                     recon = _decode_z(model, z_mod_flat)
                                     row_images.append(_tensor_to_base64(recon[0]))
                             else:
                                 # Flat latent: vary flat slice directly
                                 z_seed = z_flat[seed_idx].clone()
-                                fg_mean = z_flat[:, fg.latent_start:fg.latent_end].mean(dim=0)
-                                fg_std = z_flat[:, fg.latent_start:fg.latent_end].std(dim=0).clamp(min=0.1)
+                                fg_mean = z_flat[
+                                    :, fg.latent_start : fg.latent_end
+                                ].mean(dim=0)
+                                fg_std = (
+                                    z_flat[:, fg.latent_start : fg.latent_end]
+                                    .std(dim=0)
+                                    .clamp(min=0.1)
+                                )
                                 for step_i in range(n_steps):
-                                    alpha = -range_val + (2 * range_val) * step_i / (n_steps - 1)
+                                    alpha = -range_val + (2 * range_val) * step_i / (
+                                        n_steps - 1
+                                    )
                                     z_mod = z_seed.clone().unsqueeze(0)
-                                    z_mod[0, fg.latent_start:fg.latent_end] = fg_mean + alpha * fg_std
+                                    z_mod[0, fg.latent_start : fg.latent_end] = (
+                                        fg_mean + alpha * fg_std
+                                    )
                                     recon = _decode_z(model, z_mod)
                                     row_images.append(_tensor_to_base64(recon[0]))
                             rows.append(row_images)
@@ -1366,7 +1508,9 @@ class TrainerAPI:
                 else:
                     result = _generate_attention()
             except Exception as e:
-                return JSONResponse({"error": f"Attention extraction failed: {e}"}, status_code=400)
+                return JSONResponse(
+                    {"error": f"Attention extraction failed: {e}"}, status_code=400
+                )
 
             if "error" in result:
                 return JSONResponse(result, status_code=400)
@@ -1392,9 +1536,7 @@ class TrainerAPI:
 
             from acc.eval.ufr import compute_ufr
 
-            results = compute_ufr(
-                self.autoencoder, self.datasets, self.device
-            )
+            results = compute_ufr(self.autoencoder, self.datasets, self.device)
             return results
 
         # -- Device --
@@ -1422,17 +1564,23 @@ class TrainerAPI:
             data = await request.json()
             device_str = data.get("device")
             if not device_str:
-                return JSONResponse({"error": "Missing 'device' field"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Missing 'device' field"}, status_code=400
+                )
 
             # Validate device string
             try:
                 new_device = torch.device(device_str)
                 if new_device.type == "cuda" and not torch.cuda.is_available():
-                    return JSONResponse({"error": "CUDA not available"}, status_code=400)
+                    return JSONResponse(
+                        {"error": "CUDA not available"}, status_code=400
+                    )
                 if new_device.type == "cuda" and new_device.index is not None:
                     if new_device.index >= torch.cuda.device_count():
                         return JSONResponse(
-                            {"error": f"CUDA device {new_device.index} not found. Have {torch.cuda.device_count()} GPUs."},
+                            {
+                                "error": f"CUDA device {new_device.index} not found. Have {torch.cuda.device_count()} GPUs."
+                            },
                             status_code=400,
                         )
             except Exception as e:
@@ -1461,6 +1609,262 @@ class TrainerAPI:
             }
 
         # -- Health --
+        # -- Step Inspector (M-DBG-1) --
+
+        @app.post("/inspect/setup")
+        async def inspect_setup(request: Request):
+            """Set up a model + BCL for step-by-step inspection."""
+            if self._inspector is not None:
+                return JSONResponse(
+                    {"error": "Inspector session already active. Teardown first."},
+                    status_code=409,
+                )
+            # Block if model is busy (training/recipe)
+            if self.jobs.current() is not None:
+                return JSONResponse(
+                    {"error": "Training job running. Stop it first."},
+                    status_code=409,
+                )
+            rj = self.recipe_runner.current()
+            if rj is not None and rj.state == "running":
+                return JSONResponse(
+                    {"error": "Recipe running. Stop it first."},
+                    status_code=409,
+                )
+
+            data = await request.json()
+            condition = data.get("condition", "bcl-med")
+
+            # Build model, load data, attach BCL — replicates recipe setup
+            from acc.models.linear_ae import LinearAutoencoder
+            from acc.dataset import load_mnist
+            from acc.gradient_gating import attach_bcl, BCLConfig
+            from acc.tasks.reconstruction import ReconstructionTask
+
+            model = LinearAutoencoder(
+                in_dim=784, hidden_dim=64, image_shape=(1, 28, 28)
+            )
+            model = model.to(self.device)
+            self.autoencoder = model
+
+            # Load MNIST if not already loaded
+            if "mnist_28" not in self.datasets:
+                self.datasets["mnist_28"] = load_mnist(image_size=28)
+            mnist = self.datasets["mnist_28"]
+
+            # Attach reconstruction task
+            self.tasks.clear()
+            recon_task = ReconstructionTask("recon", mnist)
+            recon_task.attach(model)
+            self.tasks["recon"] = recon_task
+
+            # Build trainer
+            self.trainer = Trainer(
+                model,
+                [recon_task],
+                self.device,
+                lr=1e-3,
+                batch_size=128,
+            )
+
+            # Attach BCL
+            som_lr = {"bcl-slow": 0.001, "bcl-med": 0.005, "bcl-fast": 0.01}.get(
+                condition, 0.005
+            )
+            bcl_config = BCLConfig(
+                neighborhood_k=8,
+                temperature=5.0,
+                som_lr=som_lr,
+                novelty_clamp=3.0,
+                recompute_every=50,
+            )
+            bcl = attach_bcl(model, "encoder.0", bcl_config)
+
+            # Create inspector
+            inspector = StepInspector()
+            self._inspector = inspector
+            self._inspector_bcl = bcl
+            self._inspector_condition = condition
+
+            return {
+                "status": "ready",
+                "condition": condition,
+                "model_dim": 64,
+                "image_shape": [1, 28, 28],
+            }
+
+        @app.post("/inspect/step")
+        async def inspect_step(request: Request):
+            """Run one (or N) training steps and return captured tensors."""
+            if self._inspector is None:
+                return JSONResponse(
+                    {"error": "No inspector session. Call /inspect/setup first."},
+                    status_code=400,
+                )
+
+            data = await request.json() if await request.body() else {}
+            n = data.get("n", 1)
+            n = min(n, 100)  # cap at 100 steps per call
+
+            inspector = self._inspector
+            bcl = self._inspector_bcl
+            trainer = self.trainer
+            encoder_layer = dict(self.autoencoder.named_modules())["encoder.0"]
+
+            last_data = None
+            for _ in range(n):
+                # Capture batch in on_step callback
+                _captured_batch = {}
+
+                def metrics_fn(step: int):
+                    # Capture batch images from the trainer's last batch
+                    # The batch is available via the task's dataset loader
+                    inspector.capture_scalar(
+                        StepTensorKey.LOSS, _captured_batch.get("loss", 0.0)
+                    )
+                    if "batch" in _captured_batch:
+                        inspector.capture(
+                            StepTensorKey.BATCH_IMAGES, _captured_batch["batch"]
+                        )
+                    return None
+
+                original_on_step = None
+
+                def on_step(step_info: dict):
+                    _captured_batch["loss"] = step_info["task_loss"]
+
+                # We need the batch tensor. The trainer doesn't expose it directly,
+                # so we hook into the model's forward to grab it.
+                _batch_ref = {}
+
+                def _capture_input_hook(module, input, output):
+                    x = input[0]
+                    if x.ndim > 2:
+                        _batch_ref["batch"] = x.detach().clone().cpu()
+                    else:
+                        # Flat input — reshape to image for display
+                        _batch_ref["batch"] = (
+                            x.detach().clone().cpu().view(-1, 1, 28, 28)
+                        )
+
+                hook = self.autoencoder.register_forward_hook(_capture_input_hook)
+                try:
+                    trainer.train(
+                        steps=1,
+                        on_step=on_step,
+                        training_metrics_fn=metrics_fn,
+                    )
+                finally:
+                    hook.remove()
+
+                # Now capture everything into inspector
+                inspector.capture_scalar(
+                    StepTensorKey.LOSS, _captured_batch.get("loss", 0.0)
+                )
+                if "batch" in _batch_ref:
+                    inspector.capture(StepTensorKey.BATCH_IMAGES, _batch_ref["batch"])
+
+                # Capture BCL metrics if available
+                if bcl is not None and bcl._last_metrics is not None:
+                    m = bcl._last_metrics
+                    for tensor_key, metric_key in [
+                        (StepTensorKey.RANK_SCORE, "rank_score"),
+                        (StepTensorKey.STRENGTH, "strength"),
+                        (StepTensorKey.GRAD_MASK, "grad_mask"),
+                        (StepTensorKey.IN_NEIGHBORHOOD, "in_nbr"),
+                        (StepTensorKey.FEATURE_NOVELTY, "feature_novelty"),
+                        (StepTensorKey.GRADIENT_WEIGHT, "gradient_weight"),
+                        (StepTensorKey.CONTENDER_WEIGHT, "contender_weight"),
+                        (StepTensorKey.ATTRACTION_WEIGHT, "attraction_weight"),
+                        # M-DBG-3: Full tensor capture
+                        (StepTensorKey.NEIGHBORS, "neighbors"),
+                        (StepTensorKey.LOCAL_COVERAGE, "local_coverage"),
+                        (StepTensorKey.LOCAL_NOVELTY, "local_novelty"),
+                        (StepTensorKey.LOCAL_TARGET, "local_target"),
+                        (StepTensorKey.GLOBAL_TARGET, "global_target"),
+                        (StepTensorKey.SOM_TARGETS, "som_targets"),
+                    ]:
+                        if metric_key in m:
+                            inspector.capture(tensor_key, m[metric_key])
+                    # Derived per-feature and per-image summaries
+                    rs = m["rank_score"]
+                    if "win_rate" in m:
+                        inspector.capture(StepTensorKey.WIN_RATE, m["win_rate"])
+                    else:
+                        inspector.capture(StepTensorKey.WIN_RATE, rs.mean(dim=0))
+                    inspector.capture(StepTensorKey.IMAGE_COVERAGE, rs.sum(dim=1))
+
+                # Capture encoder weights
+                inspector.capture(StepTensorKey.ENCODER_WEIGHTS, encoder_layer.weight)
+
+                # Capture BCL-masked gradient on encoder weights (Force 1)
+                # Available after loss.backward() — the backward hook applied grad * mask,
+                # so weight.grad reflects the masked gradient. Still present because
+                # zero_grad() only runs at the START of the next step.
+                if encoder_layer.weight.grad is not None:
+                    inspector.capture(
+                        StepTensorKey.GRAD_MASKED, encoder_layer.weight.grad
+                    )
+
+                # Capture SOM delta from backward hook (if stored)
+                if bcl is not None and bcl._last_metrics is not None:
+                    m = bcl._last_metrics
+                    if "som_delta" in m:
+                        inspector.capture(StepTensorKey.SOM_DELTA, m["som_delta"])
+
+                last_data = inspector.collect()
+                inspector.commit()
+
+            return last_data
+
+        @app.get("/inspect/state")
+        async def inspect_state():
+            """Return current inspector session state."""
+            if self._inspector is None:
+                return {"active": False, "step": 0, "total_steps": 0, "condition": None}
+            return {
+                "active": True,
+                "step": self._inspector.step,
+                "total_steps": self._inspector.step,
+                "condition": self._inspector_condition,
+                "model_dim": 64,
+                "image_shape": [1, 28, 28],
+            }
+
+        @app.get("/inspect/history")
+        async def inspect_history():
+            """Return all step summaries (scalars + small vectors)."""
+            if self._inspector is None:
+                return []
+            return self._inspector.get_history()
+
+        @app.get("/inspect/step/{step_num}")
+        async def inspect_get_step(step_num: int):
+            """Return full tensor data for a past step."""
+            if self._inspector is None:
+                return JSONResponse({"error": "No inspector session."}, status_code=400)
+            data = self._inspector.get_step(step_num)
+            if data is None:
+                return JSONResponse(
+                    {"error": f"Step {step_num} not in ring buffer."},
+                    status_code=404,
+                )
+            return data
+
+        @app.post("/inspect/teardown")
+        async def inspect_teardown():
+            """Tear down the inspector session."""
+            if self._inspector is None:
+                return {"status": "no_session"}
+            # Remove BCL hooks
+            if self._inspector_bcl is not None:
+                self._inspector_bcl.remove()
+            self._inspector.clear()
+            self._inspector = None
+            self._inspector_bcl = None
+            self._inspector_condition = None
+            return {"status": "torn_down"}
+
         @app.get("/health")
         async def health():
             recipe_job = self.recipe_runner.current()
@@ -1471,8 +1875,10 @@ class TrainerAPI:
                 "num_datasets": len(self.datasets),
                 "num_recipes": len(self.recipe_registry.list()),
                 "num_generators": len(self.generator_registry.list()),
-                "recipe_running": recipe_job is not None and recipe_job.state == "running",
+                "recipe_running": recipe_job is not None
+                and recipe_job.state == "running",
                 "device": str(self.device),
+                "inspector_active": self._inspector is not None,
             }
 
     def _rebuild_trainer(self):
@@ -1509,7 +1915,11 @@ class TrainerAPI:
 
         @contextlib.contextmanager
         def _ctx():
-            if self.trainer is None or self.autoencoder is None or self.checkpoints is None:
+            if (
+                self.trainer is None
+                or self.autoencoder is None
+                or self.checkpoints is None
+            ):
                 raise RuntimeError("No trainer/model/checkpoint store")
 
             original_state = copy.deepcopy(self.trainer.state_dict())
@@ -1565,7 +1975,11 @@ class TrainerAPI:
         # Must be mounted AFTER all API routes so they take priority.
         dashboard_dist = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
         if dashboard_dist.is_dir():
-            self.app.mount("/", StaticFiles(directory=str(dashboard_dist), html=True), name="dashboard")
+            self.app.mount(
+                "/",
+                StaticFiles(directory=str(dashboard_dist), html=True),
+                name="dashboard",
+            )
             print(f"  Dashboard: serving from {dashboard_dist}")
         else:
             print(f"  Dashboard: not built (run 'npm run build' in dashboard/)")
@@ -1590,7 +2004,9 @@ def _decode_z(model: torch.nn.Module, z: torch.Tensor) -> torch.Tensor:
         # FactorSlotAutoencoder with spatial bottleneck
         B = z.shape[0]
         # Reshape flat z back to spatial: (B, latent_channels, h, w)
-        z_spatial = z.view(B, model.latent_channels, model._spatial_size, model._spatial_size)
+        z_spatial = z.view(
+            B, model.latent_channels, model._spatial_size, model._spatial_size
+        )
 
         # Extract factor slices (channel groups, spatially pooled) for cross-attention
         factor_slices = model._extract_factor_slices(z_spatial)

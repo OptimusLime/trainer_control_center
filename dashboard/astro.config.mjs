@@ -6,7 +6,7 @@ export default defineConfig({
   server: { host: '0.0.0.0', port: 4321 },
   vite: {
     server: {
-      allowedHosts: ['paul-cheddar'],
+      allowedHosts: ['paul-cheddar', 'pauls-macbook-pro'],
       proxy: {
         '/api': {
           target: 'http://localhost:6060',

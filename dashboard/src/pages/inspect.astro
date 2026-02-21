@@ -1,0 +1,43 @@
+---
+import Layout from '../layouts/Layout.astro';
+import InspectPanel from '../components/InspectPanel.tsx';
+---
+
+<Layout title="ACC Inspector">
+  <div class="inspect-page">
+    <nav class="inspect-nav">
+      <a href="/" class="inspect-nav-link">&larr; Dashboard</a>
+      <span class="inspect-nav-title">Step Inspector</span>
+    </nav>
+    <InspectPanel client:load />
+  </div>
+</Layout>
+
+<style>
+  .inspect-page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  .inspect-nav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border, #30363d);
+    margin-bottom: 16px;
+  }
+  .inspect-nav-link {
+    color: var(--blue, #58a6ff);
+    text-decoration: none;
+    font-size: 14px;
+  }
+  .inspect-nav-link:hover {
+    text-decoration: underline;
+  }
+  .inspect-nav-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg, #e6edf3);
+  }
+</style>

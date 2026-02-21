@@ -43,6 +43,7 @@ class GateConfig:
             At 0.0, gradients pass through unchanged. At 1.0, gradients are
             fully scaled by activation strength.
     """
+
     temperature: float = 1.0
     gate_strength: float = 1.0
 
@@ -215,6 +216,7 @@ class NeighborhoodConfig:
             0.1 = losers keep 10% gradient). Prevents total gradient starvation
             so losers can still slowly differentiate.
     """
+
     neighborhood_k: int = 8
     recompute_every: int = 50
     gate_strength: float = 1.0
@@ -250,8 +252,12 @@ class NeighborhoodGating:
         self._hooks: list = []
         self._layer_configs: dict[str, NeighborhoodConfig] = {}
         self._layer_modules: dict[str, nn.Module] = {}
-        self.last_gate_masks: dict[str, torch.Tensor] = {}  # [D] batch-mean for metrics compat
-        self.last_gate_masks_2d: dict[str, torch.Tensor] = {}  # [B, D] full per-image masks
+        self.last_gate_masks: dict[
+            str, torch.Tensor
+        ] = {}  # [D] batch-mean for metrics compat
+        self.last_gate_masks_2d: dict[
+            str, torch.Tensor
+        ] = {}  # [B, D] full per-image masks
         self.last_grad_norms: dict[str, torch.Tensor] = {}
         self.metrics: Optional["TrainingMetricsAccumulator"] = metrics
 
@@ -260,8 +266,9 @@ class NeighborhoodGating:
         self._prev_neighbors: dict[str, torch.Tensor] = {}
         self._step_count: int = 0
 
-    def _compute_neighborhoods(self, layer_name: str, module: nn.Module,
-                                config: NeighborhoodConfig) -> None:
+    def _compute_neighborhoods(
+        self, layer_name: str, module: nn.Module, config: NeighborhoodConfig
+    ) -> None:
         """Recompute k-nearest neighbors in weight space for a layer."""
         W = module.weight.detach()  # [D, in_features] for Linear
         W_flat = W.view(W.size(0), -1)  # flatten for Conv2d compatibility
@@ -280,7 +287,7 @@ class NeighborhoodGating:
         if layer_name not in self._prev_neighbors:
             return None
         prev = self._prev_neighbors[layer_name]  # [D, k]
-        curr = self._neighbors[layer_name]        # [D, k]
+        curr = self._neighbors[layer_name]  # [D, k]
         same = (prev.unsqueeze(-1) == curr.unsqueeze(-2)).any(dim=-1)  # [D, k]
         return same.float().mean().item()
 
@@ -340,6 +347,7 @@ class NeighborhoodGating:
                 self.last_gate_masks_2d[name] = soft_wins.detach().cpu()  # [B, D]
 
                 n_channels = D
+
                 def grad_hook(grad: torch.Tensor, _name=name) -> torch.Tensor:
                     if grad.ndim == 2:
                         mask_b = soft_wins  # [B, D]
@@ -378,8 +386,10 @@ class NeighborhoodGating:
             return None
 
         # Pass [B, D] masks for per-image metrics
-        masks = self.last_gate_masks_2d if self.last_gate_masks_2d else (
-            self.last_gate_masks if self.last_gate_masks else None
+        masks = (
+            self.last_gate_masks_2d
+            if self.last_gate_masks_2d
+            else (self.last_gate_masks if self.last_gate_masks else None)
         )
         self.metrics.on_step(
             step=step,
@@ -497,6 +507,7 @@ class ResidualPCAReplacer:
 
         # Collect reconstruction errors grouped by winning feature
         from collections import defaultdict
+
         neighborhood_errors: dict[int, list[torch.Tensor]] = defaultdict(list)
 
         model.eval()
@@ -590,12 +601,14 @@ class ResidualPCAReplacer:
             # Reset Adam state for this feature
             self._reset_adam_state(dead_idx_int)
 
-            replacements.append({
-                "dead_idx": dead_idx_int,
-                "donor_neighborhood": donor_nbr,
-                "error_norm": nbr_error_norms[donor_nbr],
-                "num_error_samples": len(neighborhood_errors[donor_nbr]),
-            })
+            replacements.append(
+                {
+                    "dead_idx": dead_idx_int,
+                    "donor_neighborhood": donor_nbr,
+                    "error_norm": nbr_error_norms[donor_nbr],
+                    "num_error_samples": len(neighborhood_errors[donor_nbr]),
+                }
+            )
 
         return replacements
 
@@ -617,11 +630,15 @@ class ResidualPCAReplacer:
                     ea[feature_idx] = 0
                     easq[feature_idx] = 0
                 # Decoder weight: [in_dim, D] — zero column
-                elif ea.dim() == 2 and ea.shape[1] == self.encoder_layer.weight.shape[0]:
+                elif (
+                    ea.dim() == 2 and ea.shape[1] == self.encoder_layer.weight.shape[0]
+                ):
                     ea[:, feature_idx] = 0
                     easq[:, feature_idx] = 0
                 # Bias: [D] — zero element
-                elif ea.dim() == 1 and ea.shape[0] == self.encoder_layer.weight.shape[0]:
+                elif (
+                    ea.dim() == 1 and ea.shape[0] == self.encoder_layer.weight.shape[0]
+                ):
                     ea[feature_idx] = 0
                     easq[feature_idx] = 0
 
@@ -637,6 +654,7 @@ class BCLConfig:
         novelty_clamp: Maximum novelty multiplier (caps influence of rare images).
         recompute_every: Steps between neighborhood recomputation.
     """
+
     neighborhood_k: int = 8
     temperature: float = 5.0
     som_lr: float = 0.005
@@ -680,7 +698,7 @@ class BCL:
         W_flat = W.view(W.size(0), -1)
         W_norm = torch.nn.functional.normalize(W_flat, dim=1)
         sim = W_norm @ W_norm.T
-        sim.fill_diagonal_(-float('inf'))
+        sim.fill_diagonal_(-float("inf"))
         k = min(self.config.neighborhood_k, sim.size(0) - 1)
         self._neighbors = sim.topk(k, dim=1).indices
 
@@ -689,7 +707,7 @@ class BCL:
             return
 
         layer_input = input[0].detach()  # [B, in_features]
-        act = output.detach()            # [B, D]
+        act = output.detach()  # [B, D]
 
         if act.dim() == 2:
             strength = act.abs()  # [B, D]
@@ -712,43 +730,54 @@ class BCL:
         neighbors_exp = neighbors.unsqueeze(0).expand(B, -1, -1)  # [B, D, k]
         neighbor_strengths = torch.gather(
             strength.unsqueeze(1).expand(-1, D, -1),
-            dim=2, index=neighbors_exp,
+            dim=2,
+            index=neighbors_exp,
         )  # [B, D, k]
         max_neighbor = neighbor_strengths.max(dim=2).values  # [B, D]
         margin = strength - max_neighbor  # [B, D]
         rank_score = torch.sigmoid(margin * cfg.temperature)  # [B, D]
 
         # --- Step 4: Image coverage ---
-        image_coverage = rank_score.sum(dim=1)  # [B] — how many features claim each image
+        image_coverage = rank_score.sum(
+            dim=1
+        )  # [B] — how many features claim each image
 
         # --- Step 5: Feature novelty ---
         # Of the images you win, how unique are they?
-        feature_novelty = (
-            (rank_score / (image_coverage.unsqueeze(1) + 1e-8)).sum(dim=0)
-            / (rank_score.sum(dim=0) + 1e-8)
+        feature_novelty = (rank_score / (image_coverage.unsqueeze(1) + 1e-8)).sum(
+            dim=0
+        ) / (
+            rank_score.sum(dim=0) + 1e-8
         )  # [D] — high = unique territory, low = redundant
 
         # --- Step 6: Local coverage + local novelty ---
         # For each (image, feature): how many of YOUR neighbors also won?
         neighbor_rank_scores = torch.gather(
             rank_score.unsqueeze(1).expand(-1, D, -1),
-            dim=2, index=neighbors_exp,
+            dim=2,
+            index=neighbors_exp,
         )  # [B, D, k]
         local_coverage = neighbor_rank_scores.sum(dim=2)  # [B, D]
-        local_novelty = 1.0 / (local_coverage + 1.0)     # [B, D]
+        local_novelty = 1.0 / (local_coverage + 1.0)  # [B, D]
 
         # --- Step 7: Win rate + blending weights ---
         win_rate = rank_score.mean(dim=0)  # [D]
-        effective_win = win_rate * feature_novelty             # [D] — high only if winning AND unique
-        gradient_weight = effective_win                        # [D] — unique winners get gradient
-        contender_weight = (1.0 - effective_win) * win_rate    # [D] — winning but redundant → local pull
-        attraction_weight = (1.0 - effective_win) * (1.0 - win_rate)  # [D] — losing → global pull
+        effective_win = (
+            win_rate * feature_novelty
+        )  # [D] — high only if winning AND unique
+        gradient_weight = effective_win  # [D] — unique winners get gradient
+        contender_weight = (
+            1.0 - effective_win
+        ) * win_rate  # [D] — winning but redundant → local pull
+        attraction_weight = (1.0 - effective_win) * (
+            1.0 - win_rate
+        )  # [D] — losing → global pull
 
         # --- Shared: in_neighborhood mask ---
         winners_per_image = rank_score.argmax(dim=1)  # [B]
-        winner_nbrs = neighbors[winners_per_image]    # [B, k]
+        winner_nbrs = neighbors[winners_per_image]  # [B, k]
         in_nbr = torch.zeros(B, D, device=act.device)
-        in_nbr.scatter_(1, winner_nbrs, 1.0)          # [B, D]
+        in_nbr.scatter_(1, winner_nbrs, 1.0)  # [B, D]
 
         # --- Step 8: Force 1 — Gradient (unique winners get strong gradient) ---
         grad_mask = (
@@ -758,9 +787,11 @@ class BCL:
         # --- Step 9: Force 2 — Local novelty pull (contenders find sub-niches) ---
         # Pull toward images that are locally novel — edge cases your neighbors miss
         local_pull = (
-            rank_score * local_novelty
+            rank_score
+            * local_novelty
             * (1.0 - feature_novelty).unsqueeze(0)
-            * in_nbr * contender_weight.unsqueeze(0)
+            * in_nbr
+            * contender_weight.unsqueeze(0)
         )  # [B, D]
         local_norm = local_pull.sum(dim=0, keepdim=True) + 1e-8
         local_pull = local_pull / local_norm
@@ -784,19 +815,29 @@ class BCL:
         # [D, in_features]
 
         # SOM weight for metrics (total force magnitude per feature)
-        som_weight = (
-            local_pull * contender_weight.unsqueeze(0)
-            + global_pull * attraction_weight.unsqueeze(0)
-        )  # [B, D]
+        som_weight = local_pull * contender_weight.unsqueeze(
+            0
+        ) + global_pull * attraction_weight.unsqueeze(0)  # [B, D]
 
         # --- Store metrics for this step ---
         self._last_metrics = {
-            'rank_score': rank_score.detach(),          # [B, D]
-            'feature_novelty': feature_novelty.detach(),  # [D]
-            'grad_mask': grad_mask.detach(),            # [B, D]
-            'som_weight': som_weight.detach(),          # [B, D]
-            'strength': strength.detach(),              # [B, D]
-            'in_nbr': in_nbr.detach(),                  # [B, D]
+            "rank_score": rank_score.detach(),  # [B, D]
+            "feature_novelty": feature_novelty.detach(),  # [D]
+            "grad_mask": grad_mask.detach(),  # [B, D]
+            "som_weight": som_weight.detach(),  # [B, D]
+            "strength": strength.detach(),  # [B, D]
+            "in_nbr": in_nbr.detach(),  # [B, D]
+            "gradient_weight": gradient_weight.detach(),  # [D]
+            "contender_weight": contender_weight.detach(),  # [D]
+            "attraction_weight": attraction_weight.detach(),  # [D]
+            "win_rate": win_rate.detach(),  # [D]
+            # M-DBG-3: Full tensor capture for inspector
+            "neighbors": neighbors.detach(),  # [D, k]
+            "local_coverage": local_coverage.detach(),  # [B, D]
+            "local_novelty": local_novelty.detach(),  # [B, D]
+            "local_target": local_target.detach(),  # [D, in_features]
+            "global_target": global_target.detach(),  # [D, in_features]
+            "som_targets": som_targets.detach(),  # [D, in_features]
         }
 
         # --- Register backward hook: gradient mask + SOM update ---
@@ -805,11 +846,16 @@ class BCL:
         _som_targets = som_targets.detach()
         _som_lr = cfg.som_lr
         _module = module
+        _metrics_ref = self._last_metrics  # write-back ref for som_delta
 
         def backward_hook(grad: torch.Tensor) -> torch.Tensor:
             # SOM update for losers (safe: grad already computed from unmodified weights)
             with torch.no_grad():
-                _module.weight += _som_lr * (_som_targets - _module.weight)
+                som_delta = _som_lr * (_som_targets - _module.weight)
+                _module.weight += som_delta
+                # Store som_delta for inspector capture
+                if _metrics_ref is not None:
+                    _metrics_ref["som_delta"] = som_delta.detach()
             # Gradient mask for winners
             return grad * _mask
 
@@ -821,27 +867,27 @@ class BCL:
             return None
 
         m = self._last_metrics
-        rs = m['rank_score']         # [B, D]
-        gm = m['grad_mask']          # [B, D]
-        sw = m['som_weight']         # [B, D]
-        st = m['strength']           # [B, D]
-        fn = m['feature_novelty']    # [D]
+        rs = m["rank_score"]  # [B, D]
+        gm = m["grad_mask"]  # [B, D]
+        sw = m["som_weight"]  # [B, D]
+        st = m["strength"]  # [B, D]
+        fn = m["feature_novelty"]  # [D]
 
-        win_rate = rs.mean(dim=0)              # [D]
-        grad_magnitude = gm.sum(dim=0)         # [D]
-        som_magnitude = sw.sum(dim=0)          # [D]
-        mean_activation = st.mean(dim=0)       # [D]
+        win_rate = rs.mean(dim=0)  # [D]
+        grad_magnitude = gm.sum(dim=0)  # [D]
+        som_magnitude = sw.sum(dim=0)  # [D]
+        mean_activation = st.mean(dim=0)  # [D]
 
         return {
-            'win_rate': win_rate,               # [D]
-            'grad_magnitude': grad_magnitude,   # [D]
-            'som_magnitude': som_magnitude,     # [D]
-            'mean_activation': mean_activation, # [D]
-            'feature_novelty': fn,             # [D]
-            'mean_novelty': fn.mean().item(),
-            'novelty_std': fn.std().item(),
-            'mean_crowding': rs.sum(dim=1).mean().item(),
-            'crowding_std': rs.sum(dim=1).std().item(),
+            "win_rate": win_rate,  # [D]
+            "grad_magnitude": grad_magnitude,  # [D]
+            "som_magnitude": som_magnitude,  # [D]
+            "mean_activation": mean_activation,  # [D]
+            "feature_novelty": fn,  # [D]
+            "mean_novelty": fn.mean().item(),
+            "novelty_std": fn.std().item(),
+            "mean_crowding": rs.sum(dim=1).mean().item(),
+            "crowding_std": rs.sum(dim=1).std().item(),
         }
 
     def remove(self) -> None:
@@ -922,8 +968,7 @@ def attach_neighborhood_gating(
         if layer_name not in named_modules:
             available = [n for n, _ in model.named_modules() if n]
             raise ValueError(
-                f"Layer '{layer_name}' not found in model. "
-                f"Available: {available}"
+                f"Layer '{layer_name}' not found in model. Available: {available}"
             )
         module = named_modules[layer_name]
         config = NeighborhoodConfig(
@@ -971,8 +1016,7 @@ def attach_competitive_gating(
         if layer_name not in named_modules:
             available = [n for n, _ in model.named_modules() if n]
             raise ValueError(
-                f"Layer '{layer_name}' not found in model. "
-                f"Available: {available}"
+                f"Layer '{layer_name}' not found in model. Available: {available}"
             )
         module = named_modules[layer_name]
         config = GateConfig(
