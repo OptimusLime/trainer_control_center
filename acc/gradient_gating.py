@@ -653,6 +653,11 @@ class BCLConfig:
         som_lr: SOM learning rate for loser weight updates.
         novelty_clamp: Maximum novelty multiplier (caps influence of rare images).
         recompute_every: Steps between neighborhood recomputation.
+        rescue_k: Number of images to use for rescue target per feature.
+            Hard selection: pick top-k images by weighted_affinity, average
+            their raw pixel values. k=1 = argmax (single image). k=3 = mean
+            of top 3. NOT soft weighting — each selected image contributes
+            equally. Lower k = more diverse targets across features.
     """
 
     neighborhood_k: int = 8
@@ -660,6 +665,7 @@ class BCLConfig:
     som_lr: float = 0.005
     novelty_clamp: float = 3.0
     recompute_every: int = 50
+    rescue_k: int = 1
 
 
 class BCL:
@@ -809,17 +815,23 @@ class BCL:
         image_need = 1.0 / (image_coverage + 1.0)  # [B]
         weighted_affinity = affinity * image_need.unsqueeze(1)  # [B, D]
 
-        # Top-k sparsification: keep only top-k images per feature, zero the rest
-        rescue_k = min(8, B)
+        # Hard top-k selection: pick top rescue_k images per feature,
+        # average their RAW pixel values equally. No soft weighting.
+        # k=1: rescue_target[f] = X[argmax(weighted_affinity[:, f])]
+        # k=3: rescue_target[f] = mean(X[top3_images_for_f])
+        # Hard selection breaks the feedback loop because two features
+        # with slightly different affinity columns can select DIFFERENT
+        # top images, producing genuinely different targets.
+        rescue_k = min(cfg.rescue_k, B)
         # topk along dim=0 (batch dimension) for each feature column
         topk_vals, topk_idx = weighted_affinity.topk(rescue_k, dim=0)  # [k, D]
-        rescue_pull = torch.zeros_like(weighted_affinity)  # [B, D]
-        rescue_pull.scatter_(0, topk_idx, topk_vals)  # [B, D] sparse
 
-        # Normalize per feature into pull weights
-        rescue_pull_sum = rescue_pull.sum(dim=0)  # [D] — diagnostic
-        rescue_norm = rescue_pull_sum.unsqueeze(0) + 1e-8
-        rescue_pull = rescue_pull / rescue_norm  # [B, D]
+        # Hard assignment: each selected image gets equal weight (1/k)
+        rescue_pull = torch.zeros_like(weighted_affinity)  # [B, D]
+        rescue_pull.scatter_(0, topk_idx, 1.0 / rescue_k)  # [B, D] hard uniform
+
+        # Diagnostic: sum of weighted_affinity values for selected images
+        rescue_pull_sum = topk_vals.sum(dim=0)  # [D]
         rescue_target = rescue_pull.T @ layer_input  # [D, 784]
 
         # --- Step 10: Blend winner pull + rescue pull ---
