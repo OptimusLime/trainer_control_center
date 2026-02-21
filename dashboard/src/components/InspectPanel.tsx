@@ -294,32 +294,12 @@ export default function InspectPanel() {
                 />
               </div>
             )}
-            {/* Local Target */}
-            {stepData[StepTensorKey.LOCAL_TARGET] && Array.isArray(stepData[StepTensorKey.LOCAL_TARGET]) && (
-              <div className="panel" style={{ padding: '12px' }}>
-                <InspectWeightGrid
-                  data={stepData[StepTensorKey.LOCAL_TARGET] as number[][]}
-                  title="Local Target (Force 2)"
-                  colorMode="diverging"
-                />
-              </div>
-            )}
-            {/* Global Target */}
-            {stepData[StepTensorKey.GLOBAL_TARGET] && Array.isArray(stepData[StepTensorKey.GLOBAL_TARGET]) && (
-              <div className="panel" style={{ padding: '12px' }}>
-                <InspectWeightGrid
-                  data={stepData[StepTensorKey.GLOBAL_TARGET] as number[][]}
-                  title="Global Target (Force 3)"
-                  colorMode="diverging"
-                />
-              </div>
-            )}
-            {/* SOM Targets (combined) */}
+            {/* SOM Target — local novelty pull target (THE SOM force) */}
             {stepData[StepTensorKey.SOM_TARGETS] && Array.isArray(stepData[StepTensorKey.SOM_TARGETS]) && (
               <div className="panel" style={{ padding: '12px' }}>
                 <InspectWeightGrid
                   data={stepData[StepTensorKey.SOM_TARGETS] as number[][]}
-                  title="SOM Targets (combined)"
+                  title="SOM Target (local novelty pull)"
                   colorMode="diverging"
                 />
               </div>
@@ -334,12 +314,12 @@ export default function InspectPanel() {
                 />
               </div>
             )}
-            {/* SOM Delta — the actual weight update from SOM (Forces 2+3 combined) */}
+            {/* SOM Delta — actual weight update from SOM */}
             {stepData[StepTensorKey.SOM_DELTA] && Array.isArray(stepData[StepTensorKey.SOM_DELTA]) && (
               <div className="panel" style={{ padding: '12px' }}>
                 <InspectWeightGrid
                   data={stepData[StepTensorKey.SOM_DELTA] as number[][]}
-                  title="SOM Delta (Forces 2+3 actual update)"
+                  title="SOM Delta (actual weight update)"
                   colorMode="diverging"
                 />
               </div>

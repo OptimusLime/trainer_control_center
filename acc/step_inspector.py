@@ -67,15 +67,21 @@ class StepTensorKey(str, Enum):
 
     # -- BCL blending weights --
     GRADIENT_WEIGHT = "gradient_weight"  # [D]
-    CONTENDER_WEIGHT = "contender_weight"  # [D]
-    ATTRACTION_WEIGHT = "attraction_weight"  # [D]
+    CONTENDER_WEIGHT = "contender_weight"  # [D] (legacy, kept for compat)
+    ATTRACTION_WEIGHT = "attraction_weight"  # [D] (legacy, kept for compat)
+    SOM_WEIGHT_D = "som_weight_d"  # [D] per-feature SOM weight (1 - effective_win)
 
     # -- BCL forces --
     GRAD_MASK = "grad_mask"  # [B, D]
     LOCAL_TARGET = "local_target"  # [D, in_features]
-    GLOBAL_TARGET = "global_target"  # [D, in_features]
+    GLOBAL_TARGET = "global_target"  # [D, in_features] (legacy)
     SOM_TARGETS = "som_targets"  # [D, in_features]
     SOM_DELTA = "som_delta"  # [D, in_features]
+
+    # -- BCL diagnostics --
+    LOCAL_PULL_SUM = (
+        "local_pull_sum"  # [D] raw pull signal per feature (pre-normalization)
+    )
 
     # -- Gradient --
     GRAD_MASKED = "grad_masked"  # [D, in_features]
@@ -93,7 +99,9 @@ _HISTORY_RETAIN: set[StepTensorKey] = {
     StepTensorKey.GRADIENT_WEIGHT,
     StepTensorKey.CONTENDER_WEIGHT,
     StepTensorKey.ATTRACTION_WEIGHT,
+    StepTensorKey.SOM_WEIGHT_D,
     StepTensorKey.IMAGE_COVERAGE,
+    StepTensorKey.LOCAL_PULL_SUM,
 }
 
 # Keys that contain image data and should be serialized as base64 PNG grids.

@@ -1774,15 +1774,15 @@ class TrainerAPI:
                         (StepTensorKey.IN_NEIGHBORHOOD, "in_nbr"),
                         (StepTensorKey.FEATURE_NOVELTY, "feature_novelty"),
                         (StepTensorKey.GRADIENT_WEIGHT, "gradient_weight"),
-                        (StepTensorKey.CONTENDER_WEIGHT, "contender_weight"),
-                        (StepTensorKey.ATTRACTION_WEIGHT, "attraction_weight"),
-                        # M-DBG-3: Full tensor capture
+                        # M-DBG-3.1: local-only SOM (no contender/attraction split)
+                        (StepTensorKey.SOM_WEIGHT_D, "som_weight_d"),
+                        # Full tensor capture
                         (StepTensorKey.NEIGHBORS, "neighbors"),
                         (StepTensorKey.LOCAL_COVERAGE, "local_coverage"),
                         (StepTensorKey.LOCAL_NOVELTY, "local_novelty"),
                         (StepTensorKey.LOCAL_TARGET, "local_target"),
-                        (StepTensorKey.GLOBAL_TARGET, "global_target"),
                         (StepTensorKey.SOM_TARGETS, "som_targets"),
+                        (StepTensorKey.LOCAL_PULL_SUM, "local_pull_raw_sum"),
                     ]:
                         if metric_key in m:
                             inspector.capture(tensor_key, m[metric_key])

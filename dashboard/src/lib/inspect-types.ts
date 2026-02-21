@@ -20,12 +20,14 @@ export enum StepTensorKey {
   GRADIENT_WEIGHT = 'gradient_weight',
   CONTENDER_WEIGHT = 'contender_weight',
   ATTRACTION_WEIGHT = 'attraction_weight',
+  SOM_WEIGHT_D = 'som_weight_d',
   GRAD_MASK = 'grad_mask',
   LOCAL_TARGET = 'local_target',
   GLOBAL_TARGET = 'global_target',
   SOM_TARGETS = 'som_targets',
   SOM_DELTA = 'som_delta',
   GRAD_MASKED = 'grad_masked',
+  LOCAL_PULL_SUM = 'local_pull_sum',
   ENCODER_WEIGHTS_POST = 'encoder_weights_post',
 }
 
@@ -46,7 +48,9 @@ export interface InspectStepSummary {
   gradient_weight?: number[];
   contender_weight?: number[];
   attraction_weight?: number[];
+  som_weight_d?: number[];
   image_coverage?: number[];
+  local_pull_sum?: number[];
 }
 
 export interface InspectState {

@@ -766,12 +766,7 @@ class BCL:
             win_rate * feature_novelty
         )  # [D] — high only if winning AND unique
         gradient_weight = effective_win  # [D] — unique winners get gradient
-        contender_weight = (
-            1.0 - effective_win
-        ) * win_rate  # [D] — winning but redundant → local pull
-        attraction_weight = (1.0 - effective_win) * (
-            1.0 - win_rate
-        )  # [D] — losing → global pull
+        som_weight_d = 1.0 - effective_win  # [D] — everyone else gets local SOM pull
 
         # --- Shared: in_neighborhood mask ---
         winners_per_image = rank_score.argmax(dim=1)  # [B]
@@ -784,59 +779,40 @@ class BCL:
             rank_score * feature_novelty.unsqueeze(0) * gradient_weight.unsqueeze(0)
         )  # [B, D]
 
-        # --- Step 9: Force 2 — Local novelty pull (contenders find sub-niches) ---
-        # Pull toward images that are locally novel — edge cases your neighbors miss
+        # --- Step 9: Force 2 — Local novelty pull (THE ONLY SOM FORCE) ---
+        # Pull toward images in your neighborhood that your neighbors DON'T
+        # cover well. Each feature's locally-novel images are different because
+        # each feature has different neighbors.
         local_pull = (
-            rank_score
-            * local_novelty
-            * (1.0 - feature_novelty).unsqueeze(0)
-            * in_nbr
-            * contender_weight.unsqueeze(0)
+            rank_score * local_novelty * in_nbr * som_weight_d.unsqueeze(0)
         )  # [B, D]
-        local_norm = local_pull.sum(dim=0, keepdim=True) + 1e-8
+        # Diagnostic: raw pull signal per feature BEFORE normalization.
+        # If this drops to zero, the feature is losing its SOM lifeline.
+        local_pull_raw_sum = local_pull.sum(dim=0)  # [D]
+        local_norm = local_pull_raw_sum.unsqueeze(0) + 1e-8
         local_pull = local_pull / local_norm
         local_target = local_pull.T @ layer_input  # [D, in_features]
 
-        # --- Step 10: Force 3 — Global attraction (dead features find uncovered territory) ---
-        # Pull toward globally underserved images, no neighborhood gate
-        global_pull = (
-            (1.0 - rank_score)
-            * (1.0 / (image_coverage.unsqueeze(1) + 1e-8))
-            * attraction_weight.unsqueeze(0)
-        )  # [B, D]
-        global_norm = global_pull.sum(dim=0, keepdim=True) + 1e-8
-        global_pull = global_pull / global_norm
-        global_target = global_pull.T @ layer_input  # [D, in_features]
-
-        # --- Step 11: Combine SOM targets ---
-        cw = contender_weight.unsqueeze(1)  # [D, 1]
-        aw = attraction_weight.unsqueeze(1)  # [D, 1]
-        som_targets = (cw * local_target + aw * global_target) / (cw + aw + 1e-8)
-        # [D, in_features]
-
-        # SOM weight for metrics (total force magnitude per feature)
-        som_weight = local_pull * contender_weight.unsqueeze(
-            0
-        ) + global_pull * attraction_weight.unsqueeze(0)  # [B, D]
+        # local_target IS the SOM target — no blending with global force
+        som_targets = local_target  # [D, in_features]
 
         # --- Store metrics for this step ---
         self._last_metrics = {
             "rank_score": rank_score.detach(),  # [B, D]
             "feature_novelty": feature_novelty.detach(),  # [D]
             "grad_mask": grad_mask.detach(),  # [B, D]
-            "som_weight": som_weight.detach(),  # [B, D]
+            "som_weight": local_pull.detach(),  # [B, D] — normalized pull weights
             "strength": strength.detach(),  # [B, D]
             "in_nbr": in_nbr.detach(),  # [B, D]
             "gradient_weight": gradient_weight.detach(),  # [D]
-            "contender_weight": contender_weight.detach(),  # [D]
-            "attraction_weight": attraction_weight.detach(),  # [D]
+            "som_weight_d": som_weight_d.detach(),  # [D] — per-feature SOM weight
             "win_rate": win_rate.detach(),  # [D]
+            "local_pull_raw_sum": local_pull_raw_sum.detach(),  # [D] — pull signal diagnostic
             # M-DBG-3: Full tensor capture for inspector
             "neighbors": neighbors.detach(),  # [D, k]
             "local_coverage": local_coverage.detach(),  # [B, D]
             "local_novelty": local_novelty.detach(),  # [B, D]
             "local_target": local_target.detach(),  # [D, in_features]
-            "global_target": global_target.detach(),  # [D, in_features]
             "som_targets": som_targets.detach(),  # [D, in_features]
         }
 
