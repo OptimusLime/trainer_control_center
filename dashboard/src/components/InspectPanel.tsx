@@ -134,6 +134,43 @@ export default function InspectPanel() {
                 Alive <strong style={{ color: '#e6edf3' }}>{winRate.filter(w => w > 0.01).length}/64</strong>
               </span>
             )}
+            {/* Direct step number input for history navigation */}
+            {history.length > 1 && (
+              <>
+                <span style={{ color: '#30363d' }}>|</span>
+                <span style={{ color: '#8b949e', fontSize: '12px' }}>Go to</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={history[history.length - 1]?.step ?? 0}
+                  defaultValue={viewingStep}
+                  key={viewingStep}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const val = parseInt((e.target as HTMLInputElement).value);
+                      if (!isNaN(val)) loadInspectStep(val);
+                    }
+                  }}
+                  onBlur={(e) => {
+                    const val = parseInt(e.target.value);
+                    if (!isNaN(val)) loadInspectStep(val);
+                  }}
+                  style={{
+                    width: '60px',
+                    background: 'var(--bg-secondary, #161b22)',
+                    color: 'var(--fg, #e6edf3)',
+                    border: '1px solid var(--border, #30363d)',
+                    borderRadius: '4px',
+                    padding: '2px 6px',
+                    fontSize: '12px',
+                    textAlign: 'center',
+                  }}
+                />
+                <span style={{ color: '#8b949e', fontSize: '11px' }}>
+                  / {history[history.length - 1]?.step}
+                </span>
+              </>
+            )}
           </>
         )}
         {isLoading && (
@@ -144,31 +181,13 @@ export default function InspectPanel() {
       {/* Step data display */}
       {isActive && stepData && (
         <div>
-          {/* Timeline / history slider */}
+          {/* Mini loss timeline (clickable bars) */}
           {history.length > 1 && (
-            <div className="panel" style={{ marginBottom: '12px', padding: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span className="text-muted">Timeline</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={history.length - 1}
-                  value={history.findIndex(h => h.step === viewingStep)}
-                  onChange={(e) => {
-                    const idx = parseInt(e.target.value);
-                    if (idx >= 0 && idx < history.length) {
-                      loadInspectStep(history[idx].step);
-                    }
-                  }}
-                  style={{ flex: 1 }}
-                />
-                <span>Step {viewingStep}</span>
-              </div>
-              {/* Mini loss chart */}
-              <div style={{ height: '60px', display: 'flex', alignItems: 'end', gap: '1px', marginTop: '8px' }}>
-                {history.map((h, i) => {
+            <div className="panel" style={{ marginBottom: '12px', padding: '8px 12px' }}>
+              <div style={{ height: '40px', display: 'flex', alignItems: 'end', gap: '1px' }}>
+                {history.map((h) => {
                   const maxLoss = Math.max(...history.map(hh => hh.loss ?? 0), 0.001);
-                  const barH = ((h.loss ?? 0) / maxLoss) * 56;
+                  const barH = ((h.loss ?? 0) / maxLoss) * 36;
                   const isViewing = h.step === viewingStep;
                   return (
                     <div
@@ -187,12 +206,6 @@ export default function InspectPanel() {
                     />
                   );
                 })}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
-                <span className="text-muted" style={{ fontSize: '11px' }}>Step 0</span>
-                <span className="text-muted" style={{ fontSize: '11px' }}>
-                  Step {history[history.length - 1]?.step}
-                </span>
               </div>
             </div>
           )}
