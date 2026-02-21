@@ -169,6 +169,130 @@ The current rescue mechanism (`affinity * image_need` → top-k → normalize �
 
 5. **Delayed rescue onset**: Don't apply rescue until features are actually dead (win_rate < threshold). At step 0 all features are alive — the rescue force is unnecessary and harmful.
 
+---
+
+## Fix Attempt 1: Hard Top-1 Rescue (Contrastive)
+
+**Implemented**: Changed rescue from soft weighted average (top-k=8, normalized weights)
+to hard top-k=1 (argmax — each feature's rescue target is the single best image).
+
+### Results (bcl-slow, som_lr=0.001, with clamp(min=0) affinity)
+
+```
+step | rp_sim_old | rp_sim_new | tgt_sim_old | tgt_sim_new
+-----|------------|------------|-------------|------------
+   0 |     0.065  |     0.011  |    ~0.99    |     0.38
+  50 |     0.426  |     0.435  |    ~0.99    |     0.78
+ 300 |     0.510  |     0.342  |    ~0.99    |     0.74
+```
+
+rescue_pull diversity improved 6x at init, target similarity improved from ~0.99 to
+0.38-0.74. But affinity collapse unchanged (aff_sim still hits 0.98 by step 50).
+
+---
+
+## Fix Attempt 2: Rank-Based Affinity + Hard Top-1
+
+**Implemented**: Replace `clamp(min=0)` cosine affinity with per-feature ranks:
+```python
+raw_affinity = X_norm @ W_norm.T                        # [B, D] cosine [-1, 1]
+affinity = raw_affinity.argsort(dim=0).argsort(dim=0).float() / (B-1)  # [B, D] ranks [0, 1]
+```
+
+### Key insight: cosine similarity of rank columns is misleading
+
+Random rank columns have cosine similarity 0.747 because all columns have identical
+mean (0.5) and variance. The cosine metric is dominated by the shared mean, not by
+actual correlation. **Pearson correlation** (= centered cosine) is the correct metric:
+
+```
+Random clamp(min=0) columns: cosine_sim = 0.298, pearson = 0.298
+Random rank columns:         cosine_sim = 0.747, pearson = 0.002
+```
+
+### Rank affinity results (bcl-slow, Pearson correlation)
+
+```
+step | aff_corr | rp_corr | tgt_sim | wt_sim | unique_tgt | alive
+-----|----------|---------|---------|--------|------------|------
+   0 |  -0.001  |  0.026  |  0.470  | -0.001 |         24 |   64
+   5 |   0.041  |  0.092  |  0.620  |  0.007 |         21 |   64
+  10 |   0.161  |  0.213  |  0.699  |  0.034 |         20 |   64
+  25 |   0.414  |  0.185  |  0.601  |  0.197 |         13 |   64
+  50 |   0.569  |  0.216  |  0.678  |  0.425 |         12 |   64
+ 100 |   0.652  |  0.271  |  0.680  |  0.678 |          6 |   64
+ 200 |   0.688  |  0.458  |  0.808  |  0.827 |          9 |   64
+ 300 |   0.666  |  0.444  |  0.765  |  0.863 |          7 |   64
+```
+
+### Comparison: rank vs clamp (bcl-slow, step 300)
+
+| Metric              | clamp(min=0) | rank-based |
+|---------------------|-------------|-----------|
+| aff column corr     |    ~0.99    |    0.67   |
+| rescue_pull corr    |    ~0.51    |    0.44   |
+| target similarity   |    ~0.99    |    0.77   |
+| weight similarity   |     0.89    |    0.86   |
+| features alive      |       21    |      64   |
+| unique rescue tgts  |       ~1    |       7   |
+
+### What improved
+- **Affinity correlation near-zero at init** (vs 0.30 with clamp)
+- **Slower collapse** — 0.67 at step 300 vs 0.99
+- **All 64 features stay alive** (vs 18-31 dying with clamp)
+- **Rescue targets more diverse** — 7-24 unique (vs ~1 with clamp)
+
+### What did NOT improve
+- **Weight similarity still reaches 0.86** at step 300
+- **Unique rescue targets collapse** from 24 to 6-7 by step 100
+- **Affinity correlation still grows** — feedback loop is slower but not broken
+
+---
+
+## Finding 6: Gradient Is Effectively Zero — SOM Dominates Everything
+
+The most important finding from this session. The BCL grad_mask suppresses the
+gradient to near-zero, making SOM the only force on weights.
+
+```
+                   |  grad_masked norm |  som_delta norm  | ratio (SOM/grad)
+                   |  (per feature)    |  (per feature)   |
+-------------------|-------------------|------------------|------------------
+Step 0             |     0.000003      |     0.011        |   ~3,000x
+Step 50            |     0.000000      |     0.010        |   ~10,000,000x
+Step 100           |     0.000000      |     0.010        |   ~4,000,000x
+```
+
+Why gradient is zero: `grad_mask = rank_score * novelty * gradient_weight` where
+`gradient_weight = effective_win = win_rate * feature_novelty`.
+At step 0: `effective_win` mean = 0.016 (feature_novelty is ~0.05).
+The triple-product mask (rank_score * novelty * 0.016) → ~0.0003.
+Applied to already-small reconstruction gradients → effectively zero.
+
+### The blending is also rescue-dominated
+
+```
+step | effective_win (mean) | rescue_weight (1-ew)
+-----|---------------------|--------------------
+   0 |        0.016        |       0.984
+  10 |        0.016        |       0.984
+  50 |        0.016        |       0.984
+```
+
+98.4% of SOM targets come from rescue. Winner pull barely contributes.
+
+### Implication
+
+**The algorithm is not "gradient with SOM regularization." It is "SOM with gradient
+almost completely suppressed."** Weight convergence is caused by rescue-SOM pulling
+all features toward the same few images (6-24 unique targets for 64 features).
+Fixing the affinity matrix helps with initial diversity but cannot prevent convergence
+because weights converge → rankings converge → argmax picks converge → targets converge.
+
+The gradient suppression is a separate problem from rescue collapse. Even if rescue
+targets were perfectly diverse, the algorithm wouldn't learn useful features because
+the gradient signal (which carries task information) is being zeroed out.
+
 ## Raw Data
 
 ### Baseline affinity with random weights (5 seeds)
@@ -193,4 +317,11 @@ Min: 0.049, Max: 0.918
 ```
 Without clamp(min=0): col_sim = -0.003 (random, as expected)
 With clamp(min=0):    col_sim =  0.298 (50.8% of entries clamped to 0)
+```
+
+### Rank-based affinity column similarity
+
+```
+Random rank columns: cosine_sim = 0.747 (misleading — due to shared mean 0.5)
+Random rank columns: pearson_corr = 0.002 (correct metric — near-zero as expected)
 ```

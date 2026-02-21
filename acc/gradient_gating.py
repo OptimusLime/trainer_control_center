@@ -802,14 +802,22 @@ class BCL:
         # because their weight vectors point in different directions.
         # Symmetry broken by initialization geometry.
         #
-        # TOP-K SPARSE: only pull toward the k images with highest affinity
-        # per feature. Prevents the weighted-average-of-128-images blob.
+        # RANK-BASED AFFINITY: Instead of clamp(min=0) on raw cosine,
+        # convert to per-feature ranks. Ranking is inherently feature-specific:
+        # two features with correlated raw cosine columns can have DIFFERENT
+        # rank orderings (which image is MY #1 vs YOUR #1). This breaks
+        # the column similarity that clamp(min=0) creates.
         W = module.weight.detach()  # [D, 784]
         W_norm = W / (W.norm(dim=1, keepdim=True) + 1e-8)  # [D, 784]
         X_norm = layer_input / (
             layer_input.norm(dim=1, keepdim=True) + 1e-8
         )  # [B, 784]
-        affinity = (X_norm @ W_norm.T).clamp(min=0)  # [B, D] non-negative only
+        raw_affinity = X_norm @ W_norm.T  # [B, D] raw cosine in [-1, 1]
+
+        # Convert to per-feature ranks: rank B-1 = most similar, rank 0 = least
+        # argsort().argsort() gives the rank of each element
+        affinity = raw_affinity.argsort(dim=0).argsort(dim=0).float()  # [B, D]
+        affinity = affinity / (B - 1)  # Normalize to [0, 1]
 
         # Weight by image need (how underserved each image is)
         image_need = 1.0 / (image_coverage + 1.0)  # [B]

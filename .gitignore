@@ -47,3 +47,4 @@ dashboard/.astro/
 # Misc
 *.log
 *.bak
+data/
