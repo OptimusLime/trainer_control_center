@@ -800,7 +800,7 @@ class BCL:
         X_norm = layer_input / (
             layer_input.norm(dim=1, keepdim=True) + 1e-8
         )  # [B, 784]
-        affinity = X_norm @ W_norm.T  # [B, D]
+        affinity = (X_norm @ W_norm.T).clamp(min=0)  # [B, D] non-negative only
 
         # Weight affinity by how underserved each image is
         image_need = 1.0 / (image_coverage + 1.0)  # [B]
