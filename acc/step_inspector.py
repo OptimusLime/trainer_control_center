@@ -89,6 +89,9 @@ class StepTensorKey(str, Enum):
     WEIGHTED_AFFINITY = "weighted_affinity"  # [B, D] affinity * image_need
     RESCUE_PULL = "rescue_pull"  # [B, D] sparse normalized pull weights
 
+    # -- SOM targets --
+    WINNER_TARGET = "winner_target"  # [D, in_features] — target from won images
+
     # -- Gradient --
     GRAD_MASKED = "grad_masked"  # [D, in_features]
 

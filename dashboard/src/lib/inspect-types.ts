@@ -25,6 +25,7 @@ export enum StepTensorKey {
   LOCAL_TARGET = 'local_target',
   GLOBAL_TARGET = 'global_target',
   SOM_TARGETS = 'som_targets',
+  WINNER_TARGET = 'winner_target',
   SOM_DELTA = 'som_delta',
   GRAD_MASKED = 'grad_masked',
   LOCAL_PULL_SUM = 'local_pull_sum',
@@ -64,6 +65,8 @@ export interface InspectState {
   condition: string | null;
   model_dim?: number;
   image_shape?: number[];
+  som_lr?: number;
+  rescue_k?: number;
 }
 
 export interface InspectSetupResponse {
@@ -71,4 +74,6 @@ export interface InspectSetupResponse {
   condition: string;
   model_dim: number;
   image_shape: number[];
+  som_lr: number;
+  rescue_k: number;
 }

@@ -68,11 +68,15 @@ export async function refreshInspectState() {
 }
 
 /** Set up an inspector session. */
-export async function setupInspector(condition: string = 'bcl-med') {
+export async function setupInspector(condition: string = 'bcl-med', opts?: { som_lr?: number; rescue_k?: number }) {
   const prev = $inspect.get();
   $inspect.set({ ...prev, setupLoading: true });
 
-  const result = await postJSON<InspectSetupResponse>('/inspect/setup', { condition });
+  const body: Record<string, unknown> = { condition };
+  if (opts?.som_lr !== undefined) body.som_lr = opts.som_lr;
+  if (opts?.rescue_k !== undefined) body.rescue_k = opts.rescue_k;
+
+  const result = await postJSON<InspectSetupResponse>('/inspect/setup', body);
   const cur = $inspect.get();
 
   if (result) {
@@ -86,6 +90,8 @@ export async function setupInspector(condition: string = 'bcl-med') {
         condition: result.condition,
         model_dim: result.model_dim,
         image_shape: result.image_shape,
+        som_lr: result.som_lr,
+        rescue_k: result.rescue_k,
       },
       currentStepData: null,
       history: [],
@@ -150,13 +156,13 @@ export async function teardownInspector() {
 }
 
 /** Tear down current session and set up a new one with a different condition. */
-export async function switchCondition(condition: string) {
+export async function switchCondition(condition: string, opts?: { som_lr?: number; rescue_k?: number }) {
   const prev = $inspect.get();
   if (prev.state.active) {
     await postJSON('/inspect/teardown');
   }
   $inspect.set({ ...INITIAL, setupLoading: true });
-  await setupInspector(condition);
+  await setupInspector(condition, opts);
 }
 
 /**

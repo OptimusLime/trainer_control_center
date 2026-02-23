@@ -874,6 +874,7 @@ class BCL:
             "local_coverage": local_coverage.detach(),  # [B, D]
             "local_novelty": local_novelty.detach(),  # [B, D]
             "local_target": rescue_target.detach(),  # [D, in_features] — rescue target
+            "winner_target": winner_target.detach(),  # [D, in_features] — winner pull target
             "som_targets": som_targets.detach(),  # [D, in_features]
             # Rescue diagnostics (5 vectors)
             "affinity": affinity.detach(),  # [B, D]

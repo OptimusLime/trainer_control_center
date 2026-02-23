@@ -1668,14 +1668,15 @@ class TrainerAPI:
             )
 
             # Attach BCL
-            som_lr = {
+            som_lr_default = {
                 "bcl-micro": 0.0001,
                 "bcl-tiny": 0.0003,
                 "bcl-slow": 0.001,
                 "bcl-med": 0.005,
                 "bcl-fast": 0.01,
             }.get(condition, 0.005)
-            rescue_k = data.get("rescue_k", 3)
+            som_lr = data.get("som_lr", som_lr_default)
+            rescue_k = data.get("rescue_k", 5)
             bcl_config = BCLConfig(
                 neighborhood_k=8,
                 temperature=5.0,
@@ -1691,12 +1692,16 @@ class TrainerAPI:
             self._inspector = inspector
             self._inspector_bcl = bcl
             self._inspector_condition = condition
+            self._inspector_som_lr = som_lr
+            self._inspector_rescue_k = rescue_k
 
             return {
                 "status": "ready",
                 "condition": condition,
                 "model_dim": 64,
                 "image_shape": [1, 28, 28],
+                "som_lr": som_lr,
+                "rescue_k": rescue_k,
             }
 
         @app.post("/inspect/step")
@@ -1787,6 +1792,7 @@ class TrainerAPI:
                         (StepTensorKey.LOCAL_COVERAGE, "local_coverage"),
                         (StepTensorKey.LOCAL_NOVELTY, "local_novelty"),
                         (StepTensorKey.LOCAL_TARGET, "local_target"),
+                        (StepTensorKey.WINNER_TARGET, "winner_target"),
                         (StepTensorKey.SOM_TARGETS, "som_targets"),
                         (StepTensorKey.LOCAL_PULL_SUM, "local_pull_raw_sum"),
                         # Rescue diagnostics
@@ -1840,6 +1846,8 @@ class TrainerAPI:
                 "condition": self._inspector_condition,
                 "model_dim": 64,
                 "image_shape": [1, 28, 28],
+                "som_lr": getattr(self, "_inspector_som_lr", None),
+                "rescue_k": getattr(self, "_inspector_rescue_k", None),
             }
 
         @app.get("/inspect/history")

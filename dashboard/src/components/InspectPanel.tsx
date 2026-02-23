@@ -26,6 +26,29 @@ import { useEffect, useState } from 'react';
 
 const CONDITIONS = ['bcl-micro', 'bcl-tiny', 'bcl-slow', 'bcl-med', 'bcl-fast'] as const;
 const DEFAULT_CONDITION = 'bcl-slow';
+const SOM_LR_OPTIONS = [0.0001, 0.0003, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1];
+
+/** Compute mean pairwise cosine similarity of rows in a [D, F] matrix. */
+function rowCosineSim(mat: number[][]): number {
+  const D = mat.length;
+  if (D < 2) return 0;
+  // Normalize rows
+  const normed = mat.map(row => {
+    const norm = Math.sqrt(row.reduce((s, v) => s + v * v, 0)) + 1e-8;
+    return row.map(v => v / norm);
+  });
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < D; i++) {
+    for (let j = i + 1; j < D; j++) {
+      let dot = 0;
+      for (let k = 0; k < normed[i].length; k++) dot += normed[i][k] * normed[j][k];
+      sum += dot;
+      count++;
+    }
+  }
+  return count > 0 ? sum / count : 0;
+}
 
 export default function InspectPanel() {
   const state = useStore($inspectState);
@@ -35,6 +58,7 @@ export default function InspectPanel() {
   const setupLoading = useStore($inspectSetupLoading);
   const stepLoading = useStore($inspectStepLoading);
   const [selectedCondition, setSelectedCondition] = useState(DEFAULT_CONDITION);
+  const [selectedSomLr, setSelectedSomLr] = useState(0.001);
 
   // Auto-setup on mount
   useEffect(() => {
@@ -46,7 +70,10 @@ export default function InspectPanel() {
     if (state.condition) {
       setSelectedCondition(state.condition);
     }
-  }, [state.condition]);
+    if (state.som_lr !== undefined) {
+      setSelectedSomLr(state.som_lr);
+    }
+  }, [state.condition, state.som_lr]);
 
   const isActive = state.active;
   const isLoading = setupLoading;
@@ -59,7 +86,12 @@ export default function InspectPanel() {
 
   const handleConditionChange = (newCondition: string) => {
     setSelectedCondition(newCondition);
-    switchCondition(newCondition);
+    switchCondition(newCondition, { som_lr: selectedSomLr });
+  };
+
+  const handleSomLrChange = (newLr: number) => {
+    setSelectedSomLr(newLr);
+    switchCondition(selectedCondition, { som_lr: newLr });
   };
 
   return (
@@ -94,6 +126,24 @@ export default function InspectPanel() {
         >
           {CONDITIONS.map((c) => (
             <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <span style={{ color: '#8b949e', fontSize: '12px' }}>som_lr</span>
+        <select
+          value={selectedSomLr}
+          onChange={(e) => handleSomLrChange(parseFloat(e.target.value))}
+          disabled={isLoading || stepLoading}
+          style={{
+            background: 'var(--bg-secondary, #161b22)',
+            color: 'var(--fg, #e6edf3)',
+            border: '1px solid var(--border, #30363d)',
+            borderRadius: '6px',
+            padding: '4px 8px',
+            fontSize: '13px',
+          }}
+        >
+          {SOM_LR_OPTIONS.map((lr) => (
+            <option key={lr} value={lr}>{lr}</option>
           ))}
         </select>
         {isActive && !isLoading && (
@@ -404,6 +454,99 @@ export default function InspectPanel() {
             </div>
           </div>
 
+          {/* === SOM FORCE DIAGNOSTICS ===
+           * The SOM's job is to spread features out. Is it working?
+           * - feature_novelty [D]: are features actually in unique territory?
+           * - som_weight_d [D]: how much SOM pull per feature? (1 - feature_novelty)
+           * - win_rate [D]: who's winning images?
+           * - wt_sim: are features actually different? (mean pairwise cosine of weights)
+           * - winner_target vs rescue_target vs som_targets: what are features being pulled toward?
+           */}
+          <div style={{ marginTop: '24px' }}>
+            <h3 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#8b949e' }}>
+              SOM Force Diagnostics — Is the SOM spreading features?
+            </h3>
+
+            {/* Computed weight similarity */}
+            {stepData[StepTensorKey.ENCODER_WEIGHTS] && Array.isArray(stepData[StepTensorKey.ENCODER_WEIGHTS]) && Array.isArray((stepData[StepTensorKey.ENCODER_WEIGHTS] as unknown[])[0]) && (() => {
+              const wt = stepData[StepTensorKey.ENCODER_WEIGHTS] as number[][];
+              const wtSim = rowCosineSim(wt);
+              const color = wtSim > 0.9 ? '#f85149' : wtSim > 0.7 ? '#f0883e' : wtSim > 0.4 ? '#d29922' : '#3fb950';
+              return (
+                <div style={{ display: 'flex', gap: '24px', alignItems: 'center', marginBottom: '12px', padding: '8px 12px', background: 'var(--bg-secondary, #161b22)', borderRadius: '6px', border: `1px solid ${color}40` }}>
+                  <div>
+                    <span style={{ color: '#8b949e', fontSize: '12px' }}>Weight Similarity: </span>
+                    <strong style={{ color, fontSize: '16px' }}>{wtSim.toFixed(3)}</strong>
+                    <span style={{ color: '#6e7681', fontSize: '11px', marginLeft: '8px' }}>
+                      {wtSim > 0.9 ? '(nearly identical — SOM is failing)' : wtSim > 0.7 ? '(converging)' : wtSim > 0.4 ? '(moderate)' : '(diverse)'}
+                    </span>
+                  </div>
+                  {state.som_lr !== undefined && (
+                    <div>
+                      <span style={{ color: '#8b949e', fontSize: '12px' }}>som_lr: </span>
+                      <strong style={{ color: '#e6edf3', fontSize: '13px' }}>{state.som_lr}</strong>
+                    </div>
+                  )}
+                  {state.rescue_k !== undefined && (
+                    <div>
+                      <span style={{ color: '#8b949e', fontSize: '12px' }}>rescue_k: </span>
+                      <strong style={{ color: '#e6edf3', fontSize: '13px' }}>{state.rescue_k}</strong>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Bar charts: feature_novelty, som_weight_d, win_rate side by side */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+              {stepData[StepTensorKey.FEATURE_NOVELTY] && Array.isArray(stepData[StepTensorKey.FEATURE_NOVELTY]) && !Array.isArray((stepData[StepTensorKey.FEATURE_NOVELTY] as unknown[])[0]) && (
+                <div className="panel" style={{ padding: '12px' }}>
+                  <InspectBarChart
+                    data={stepData[StepTensorKey.FEATURE_NOVELTY] as number[]}
+                    title="Feature Novelty [D] — unique territory?"
+                    xLabel="Features (D=64)"
+                    color="#a371f7"
+                    width={350}
+                    height={80}
+                  />
+                  <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                    High = unique wins. Low = redundant (same images as neighbors). FLAT = no diversity signal.
+                  </p>
+                </div>
+              )}
+              {stepData[StepTensorKey.SOM_WEIGHT_D] && Array.isArray(stepData[StepTensorKey.SOM_WEIGHT_D]) && !Array.isArray((stepData[StepTensorKey.SOM_WEIGHT_D] as unknown[])[0]) && (
+                <div className="panel" style={{ padding: '12px' }}>
+                  <InspectBarChart
+                    data={stepData[StepTensorKey.SOM_WEIGHT_D] as number[]}
+                    title="SOM Weight [D] — (1-novelty), pull strength"
+                    xLabel="Features (D=64)"
+                    color="#f0883e"
+                    width={350}
+                    height={80}
+                  />
+                  <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                    High = strong SOM pull (redundant feature). Low = left alone (unique feature). FLAT = SOM treats everyone the same.
+                  </p>
+                </div>
+              )}
+              {winRate && (
+                <div className="panel" style={{ padding: '12px' }}>
+                  <InspectBarChart
+                    data={winRate}
+                    title="Win Rate [D] — fraction of batch won"
+                    xLabel="Features (D=64)"
+                    color="#58a6ff"
+                    width={350}
+                    height={80}
+                  />
+                  <p style={{ fontSize: '10px', color: '#6e7681', margin: '4px 0 0 0' }}>
+                    Spiky = some features dominate. Flat-low = even competition. Zero = dead features.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Weight grids: [D, 784] as 28x28 thumbnails */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', marginTop: '16px' }}>
             {/* Encoder Weights */}
@@ -416,13 +559,33 @@ export default function InspectPanel() {
                 />
               </div>
             )}
-            {/* SOM Target — local novelty pull target (THE SOM force) */}
+            {/* Winner Target — weighted avg of won images */}
+            {stepData[StepTensorKey.WINNER_TARGET] && Array.isArray(stepData[StepTensorKey.WINNER_TARGET]) && (
+              <div className="panel" style={{ padding: '12px' }}>
+                <InspectWeightGrid
+                  data={stepData[StepTensorKey.WINNER_TARGET] as number[][]}
+                  title="Winner Target (won images)"
+                  colorMode="grayscale"
+                />
+              </div>
+            )}
+            {/* Rescue Target — nearest underserved images */}
+            {stepData[StepTensorKey.LOCAL_TARGET] && Array.isArray(stepData[StepTensorKey.LOCAL_TARGET]) && (
+              <div className="panel" style={{ padding: '12px' }}>
+                <InspectWeightGrid
+                  data={stepData[StepTensorKey.LOCAL_TARGET] as number[][]}
+                  title="Rescue Target (nearest underserved)"
+                  colorMode="grayscale"
+                />
+              </div>
+            )}
+            {/* SOM Target — blended winner + rescue */}
             {stepData[StepTensorKey.SOM_TARGETS] && Array.isArray(stepData[StepTensorKey.SOM_TARGETS]) && (
               <div className="panel" style={{ padding: '12px' }}>
                 <InspectWeightGrid
                   data={stepData[StepTensorKey.SOM_TARGETS] as number[][]}
-                  title="SOM Target (local novelty pull)"
-                  colorMode="diverging"
+                  title="SOM Target (blended: wr*winner + (1-wr)*rescue)"
+                  colorMode="grayscale"
                 />
               </div>
             )}
