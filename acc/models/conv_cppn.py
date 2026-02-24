@@ -168,9 +168,11 @@ def default_genome() -> ConvCPPNGenome:
         stride=1,
         padding=1,
     )
-    # Decoder layer 2: 14→28. Input = 1 + 3 coords = 4. Output = 1ch relu.
+    # Decoder layer 2: 14→28. Input = 1 + 3 coords = 4. Output = 1ch sigmoid.
+    # Sigmoid on the output layer bounds output to (0,1) matching MNIST range,
+    # preventing zero-collapse under MSE loss.
     dec_2 = LayerGenome(
-        channel_descriptors=[ChannelDescriptor(activation="relu")],
+        channel_descriptors=[ChannelDescriptor(activation="sigmoid")],
         connection_mask=[[1, 1, 1, 1]],
         kernel_size=3,
         stride=1,
@@ -515,7 +517,8 @@ class ConvCPPN(nn.Module):
             h = torch.cat([h, coords], dim=1)
             h = layer(h)
 
-        # Output is [B, 1, 28, 28] — already has sigmoid from last layer activation
+        # Output is [B, 1, 28, 28] — activation applied by last decoder layer
+        # (default genome uses sigmoid on output layer to bound to (0,1))
         reconstruction = h
 
         return {

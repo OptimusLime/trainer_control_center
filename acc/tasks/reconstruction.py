@@ -1,10 +1,16 @@
 """ReconstructionTask — uses model's decoder directly.
 
-No probe head. L1 + SSIM loss between input and reconstruction. PSNR eval.
+No probe head. Pixel loss + optional SSIM between input and reconstruction.
 check_compatible: model must have decoder (has_decoder=True).
 
 Reads RECONSTRUCTION and SPATIAL from the model_output dict — no re-encode.
 Reconstruction is NOT special — it's just another task.
+
+Supports two pixel-loss functions:
+  - 'mse' (default): MSE penalizes large errors quadratically, preventing
+    zero-collapse on sparse images like MNIST.
+  - 'l1': L1 loss. Prone to zero-collapse when images are mostly black
+    (outputting all-zeros gives low L1 ≈ 0.12 on MNIST).
 """
 
 from typing import Optional
@@ -93,21 +99,32 @@ def ssim_loss(x: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
 
 
 class ReconstructionTask(Task):
-    """Reconstruction via the model's decoder. L1 + SSIM loss, PSNR eval.
+    """Reconstruction via the model's decoder. Pixel loss + optional SSIM.
 
     Requires autoencoder with a decoder (has_decoder=True).
     No probe head — reads RECONSTRUCTION directly from model forward output.
 
-    Loss = L1 + ssim_weight * (1 - SSIM).
-    ssim_weight=0 gives pure L1 (original behavior).
-    ssim_weight=1 gives equal L1 and SSIM.
+    Loss = pixel_loss + ssim_weight * (1 - SSIM).
+
+    Args:
+        loss_fn: 'mse' (default) or 'l1'. MSE prevents zero-collapse on
+            sparse images; L1 is prone to it.
+        ssim_weight: Weight for SSIM loss term. 0 = pure pixel loss.
     """
 
     def __init__(
-        self, name: str, dataset: AccDataset, ssim_weight: float = 0.0, **kwargs
+        self,
+        name: str,
+        dataset: AccDataset,
+        ssim_weight: float = 0.0,
+        loss_fn: str = "mse",
+        **kwargs,
     ):
         super().__init__(name, dataset, **kwargs)
         self.ssim_weight = ssim_weight
+        if loss_fn not in ("mse", "l1"):
+            raise ValueError(f"loss_fn must be 'mse' or 'l1', got {loss_fn!r}")
+        self.loss_fn = loss_fn
 
     def check_compatible(self, autoencoder: nn.Module, dataset: AccDataset) -> None:
         if not autoencoder.has_decoder:
@@ -122,17 +139,21 @@ class ReconstructionTask(Task):
     def compute_loss(
         self, model_output: dict[str, torch.Tensor], batch: tuple
     ) -> torch.Tensor:
-        """L1 + SSIM reconstruction loss."""
+        """Pixel loss + optional SSIM reconstruction loss."""
         images = batch[0]
         recon = model_output[ModelOutput.RECONSTRUCTION]
-        l1 = F.l1_loss(recon, images)
+
+        if self.loss_fn == "mse":
+            pixel_loss = F.mse_loss(recon, images)
+        else:
+            pixel_loss = F.l1_loss(recon, images)
 
         if self.ssim_weight > 0:
             # Clamp to [0,1] for SSIM (it assumes this range for C1/C2)
             recon_clamped = recon.clamp(0, 1)
             s_loss = ssim_loss(recon_clamped, images)
-            return l1 + self.ssim_weight * s_loss
-        return l1
+            return pixel_loss + self.ssim_weight * s_loss
+        return pixel_loss
 
     @torch.no_grad()
     def evaluate(

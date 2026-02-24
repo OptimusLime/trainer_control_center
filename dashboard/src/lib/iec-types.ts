@@ -25,6 +25,7 @@ export interface IecState {
   activation_names: string[];
   resolutions: IecResolutions | null;
   ssim_weight: number;
+  loss_fn: string;         // 'mse' or 'l1'
 }
 
 export interface IecGenome {
@@ -80,7 +81,7 @@ export interface IecCheckpoint {
 export interface IecFeatureChannel {
   activation: string;
   data: number[][];
-  grad?: number[][];      // gradient w.r.t. L1 reconstruction loss
+  grad?: number[][];      // gradient w.r.t. reconstruction loss
   kernels?: number[][][];  // per-connected-input KxK kernel weights
 }
 
@@ -94,8 +95,8 @@ export interface IecFeatureMaps {
   input_image: string;    // base64 PNG
   recon_image: string;    // base64 PNG — model's reconstruction
   error_map: number[][];  // |recon - input| per pixel, 28x28
-  loss: number;           // total loss (L1 + SSIM) for this image
-  l1: number;             // L1 component only
+  loss: number;           // total loss (pixel + SSIM) for this image
+  l1: number;             // pixel loss component only (MSE or L1)
   encoder: IecFeatureLayer[];
   latent: IecFeatureLayer | null;
   decoder: IecFeatureLayer[];

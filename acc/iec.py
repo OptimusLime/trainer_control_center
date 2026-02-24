@@ -76,7 +76,8 @@ class IECSession:
         self.last_loss: Optional[float] = None
         self.undo_stack: list[tuple[dict, dict]] = []  # (genome_dict, state_dict)
         self._lr: float = 1e-3
-        self.ssim_weight: float = 1.0  # L1 + ssim_weight * (1 - SSIM)
+        self.ssim_weight: float = 0.0  # pixel_loss + ssim_weight * (1 - SSIM)
+        self.loss_fn: str = "mse"  # 'mse' or 'l1'
 
     def setup(
         self,
@@ -111,7 +112,9 @@ class IECSession:
 
     def _build_trainer(self):
         """(Re)build the trainer with current model and dataset."""
-        task = ReconstructionTask("recon", self.dataset, ssim_weight=self.ssim_weight)
+        task = ReconstructionTask(
+            "recon", self.dataset, ssim_weight=self.ssim_weight, loss_fn=self.loss_fn
+        )
         task.attach(self.model)
         self.trainer = Trainer(
             self.model,
@@ -140,6 +143,7 @@ class IECSession:
             "activation_names": ACTIVATION_NAMES,
             "resolutions": self.model.resolution_info() if self.model else None,
             "ssim_weight": self.ssim_weight,
+            "loss_fn": self.loss_fn,
         }
 
     def get_reconstructions(self, n: int = 8, normalize: bool = False) -> dict:
@@ -488,17 +492,20 @@ class IECSession:
         images = self.dataset.sample(n).to(self.device)
         output = self.model(images)
 
-        # Compute same loss as training: L1 + ssim_weight * (1 - SSIM)
+        # Compute same loss as training: pixel_loss + ssim_weight * (1 - SSIM)
         from acc.tasks.reconstruction import ssim_loss as _ssim_loss
 
         recon = output[ModelOutput.RECONSTRUCTION]
-        l1 = nn.functional.l1_loss(recon, images)
-        loss = l1
+        if self.loss_fn == "mse":
+            pixel_loss = nn.functional.mse_loss(recon, images)
+        else:
+            pixel_loss = nn.functional.l1_loss(recon, images)
+        loss = pixel_loss
         if self.ssim_weight > 0:
             recon_clamped = recon.clamp(0, 1)
             loss = loss + self.ssim_weight * _ssim_loss(recon_clamped, images)
         loss_val = loss.item()
-        l1_val = l1.item()
+        l1_val = pixel_loss.item()
 
         # Backward to get gradients on all retained activations
         loss.backward()

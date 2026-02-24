@@ -154,7 +154,7 @@ export default function IecPanel() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                   <span style={{ ...dimText, fontWeight: 600, fontSize: 10 }}>Feature Maps</span>
                   <span style={{ fontSize: 10, color: '#8b949e', fontFamily: 'monospace' }}>
-                    L1 <b style={{ color: '#e6edf3' }}>{featureMaps.l1.toFixed(4)}</b>
+                    {(state?.loss_fn ?? 'mse').toUpperCase()} <b style={{ color: '#e6edf3' }}>{featureMaps.l1.toFixed(4)}</b>
                     {featureMaps.loss !== featureMaps.l1 && (
                       <> total <b style={{ color: '#e6edf3' }}>{featureMaps.loss.toFixed(4)}</b></>
                     )}
@@ -612,7 +612,7 @@ function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel }: {
           style={{ imageRendering: 'pixelated', border: '1px solid #58a6ff', background: '#000', display: 'block' }} />
         <span style={{ fontSize: 7, color: '#58a6ff', lineHeight: 1 }}>recon</span>
       </div>
-      {/* Per-pixel L1 error: bright = high error */}
+      {/* Per-pixel error: bright = high error */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         <MiniHeatmap data={errorMap} width={dispW} height={dispH} />
         <span style={{ fontSize: 7, color: '#f85149', lineHeight: 1 }}>error</span>
