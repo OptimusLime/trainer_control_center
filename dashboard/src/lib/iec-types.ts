@@ -51,6 +51,7 @@ export interface IecLayerGenome {
   kernel_size: number;
   stride: number;
   padding: number;
+  use_coords?: boolean;
 }
 
 export interface IecChannelDescriptor {

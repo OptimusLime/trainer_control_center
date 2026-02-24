@@ -30,6 +30,7 @@ from acc.models.conv_cppn import (
     remove_encoder_layer,
     add_decoder_layer,
     remove_decoder_layer,
+    toggle_coords,
     transfer_weights,
 )
 from acc.model_output import ModelOutput
@@ -523,6 +524,12 @@ class IECSession:
                 self.genome = remove_encoder_layer(old_genome, layer_idx)
             else:
                 self.genome = remove_decoder_layer(old_genome, layer_idx)
+        elif mutation_type == "toggle_coords":
+            self.genome = toggle_coords(
+                old_genome,
+                side=kwargs["side"],
+                layer_idx=int(kwargs["layer_idx"]),
+            )
         else:
             # Roll back — invalid mutation type
             self.undo_stack.pop()

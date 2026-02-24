@@ -52,7 +52,7 @@ export default function IecPanel() {
   const checkpoints = useStore($iecCheckpoints);
   const featureMaps = useStore($iecFeatureMaps);
   const tasks = useStore($iecTasks);
-  const [lr, setLr] = useState('0.01');
+  const [lr, setLr] = useState('0.003');
   const [cpTag, setCpTag] = useState('');
   const [selectedChannel, setSelectedChannel] = useState<ChannelSelection | null>(null);
   const [normalizeActivations, setNormalizeActivations] = useState(true);
@@ -60,7 +60,17 @@ export default function IecPanel() {
   useEffect(() => { ensureIecSession(); }, []);
 
   if (setupLoading) return <div style={{ color: '#8b949e', padding: 20 }}>Setting up IEC session...</div>;
-  if (!state.active) return <div style={{ color: '#8b949e', padding: 20 }}>No IEC session active.</div>;
+  if (!state.active) return (
+    <div style={{ color: '#8b949e', padding: 20 }}>
+      No IEC session active.{' '}
+      <button onClick={() => ensureIecSession()} style={{
+        background: '#21262d', border: '1px solid #30363d', borderRadius: 4,
+        color: '#58a6ff', padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+      }}>
+        Connect
+      </button>
+    </div>
+  );
 
   const genome = state.genome;
   const encLayers = genome?.encoder_layers ?? [];
@@ -95,6 +105,43 @@ export default function IecPanel() {
           <input type="number" value={state.ssim_weight} onChange={e => setSsimWeight(parseFloat(e.target.value) || 0)}
             step="0.1" min="0" max="5" style={{ ...inputStyle, width: 50 }} />
         </label>
+
+        <div style={{ borderLeft: '1px solid #30363d', height: 20, margin: '0 2px' }} />
+
+        {/* Structural losses — inline checkboxes */}
+        {(() => {
+          const sparsity = tasks.find(t => t.name === 'lifetime_sparsity');
+          const exclusivity = tasks.find(t => t.name === 'exclusivity');
+          return <>
+            {sparsity && (
+              <label style={{ fontSize: 11, color: sparsity.enabled ? '#e6edf3' : '#484f58', display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer', userSelect: 'none' }}>
+                <input type="checkbox" checked={sparsity.enabled} disabled={busy}
+                  onChange={() => setTaskConfig('lifetime_sparsity', { enabled: !sparsity.enabled })}
+                  style={{ margin: 0, width: 11, height: 11 }} />
+                Sparsity
+                {sparsity.enabled && (
+                  <input type="number" value={sparsity.weight} disabled={busy}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) setTaskConfig('lifetime_sparsity', { weight: v }); }}
+                    step="0.1" min="0" max="10" style={{ ...inputStyle, width: 38, fontSize: 10, padding: '1px 3px' }} />
+                )}
+              </label>
+            )}
+            {exclusivity && (
+              <label style={{ fontSize: 11, color: exclusivity.enabled ? '#e6edf3' : '#484f58', display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer', userSelect: 'none' }}>
+                <input type="checkbox" checked={exclusivity.enabled} disabled={busy}
+                  onChange={() => setTaskConfig('exclusivity', { enabled: !exclusivity.enabled })}
+                  style={{ margin: 0, width: 11, height: 11 }} />
+                Exclusivity
+                {exclusivity.enabled && (
+                  <input type="number" value={exclusivity.weight} disabled={busy}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0) setTaskConfig('exclusivity', { weight: v }); }}
+                    step="0.1" min="0" max="10" style={{ ...inputStyle, width: 38, fontSize: 10, padding: '1px 3px' }} />
+                )}
+              </label>
+            )}
+          </>;
+        })()}
+
         {[1, 10, 50, 100, 500].map(n => (
           <button key={n} onClick={() => stepIec(n, parseFloat(lr))} disabled={busy}
             style={busy ? { ...btn, opacity: 0.5 } : btn}>
@@ -207,9 +254,6 @@ export default function IecPanel() {
           layerResolutions={resolutions?.decoder ?? null}
         />
       </div>
-
-      {/* Training Tasks */}
-      <TaskPanel tasks={tasks} busy={busy} />
 
       {/* Checkpoints */}
       <div style={{ ...card, marginBottom: 8 }}>
@@ -347,6 +391,22 @@ function LayerRow({ layer, side, layerIdx, activations, busy, canRemoveChannels,
           {' '}
           {layer.channel_descriptors.length}ch
         </span>
+        {/* Coord toggle — per-layer XY+Gauss injection */}
+        <button
+          disabled={busy}
+          onClick={() => mutateIec('toggle_coords', { side, layer_idx: layerIdx })}
+          style={{
+            ...pillBtn,
+            fontSize: 9,
+            padding: '1px 6px',
+            color: layer.use_coords ? '#3fb950' : '#484f58',
+            borderColor: layer.use_coords ? '#238636' : '#30363d',
+            background: layer.use_coords ? '#1a2e1a' : '#21262d',
+          }}
+          title={layer.use_coords ? 'Coords ON — click to disable XY+Gauss input' : 'Coords OFF — click to enable XY+Gauss input'}
+        >
+          XY
+        </button>
         <div style={{ flex: 1 }} />
         {canRemoveLayer && (
           <button
@@ -884,159 +944,6 @@ function Stat({ label, value }: { label: string; value: string | number }) {
     <span style={{ fontSize: 12, color: '#8b949e', fontFamily: 'monospace' }}>
       {label} <b style={{ color: '#e6edf3' }}>{value}</b>
     </span>
-  );
-}
-
-/* -- Training Task Panel -- */
-
-const CATEGORY_ORDER: Record<string, number> = { structural: 0, reconstruction: 1, diagnostic: 2 };
-const CATEGORY_COLORS: Record<string, string> = {
-  structural: '#58a6ff',
-  reconstruction: '#3fb950',
-  diagnostic: '#d29922',
-};
-
-function TaskPanel({ tasks, busy }: { tasks: IecTaskConfig[]; busy: boolean }) {
-  const [expanded, setExpanded] = useState(true);
-
-  if (!tasks || tasks.length === 0) return null;
-
-  // Group by category
-  const grouped: Record<string, IecTaskConfig[]> = {};
-  for (const t of tasks) {
-    (grouped[t.category] ??= []).push(t);
-  }
-  const categories = Object.keys(grouped).sort(
-    (a, b) => (CATEGORY_ORDER[a] ?? 9) - (CATEGORY_ORDER[b] ?? 9)
-  );
-
-  return (
-    <div style={{ ...card, marginBottom: 8 }}>
-      <div
-        style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none' }}
-        onClick={() => setExpanded(!expanded)}
-      >
-        <span style={{ ...dimText, fontWeight: 600, fontSize: 12 }}>
-          Training Tasks
-        </span>
-        <span style={{ fontSize: 10, color: '#484f58' }}>
-          {tasks.filter(t => t.enabled).length}/{tasks.length} enabled
-        </span>
-        <span style={{ fontSize: 10, color: '#484f58' }}>{expanded ? '▾' : '▸'}</span>
-      </div>
-      {expanded && (
-        <div style={{ marginTop: 6 }}>
-          {categories.map(cat => (
-            <div key={cat} style={{ marginBottom: 6 }}>
-              <div style={{
-                fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em',
-                color: CATEGORY_COLORS[cat] ?? '#8b949e', marginBottom: 3,
-              }}>
-                {cat}
-              </div>
-              {grouped[cat].map(task => (
-                <TaskRow key={task.name} task={task} busy={busy} />
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TaskRow({ task, busy }: { task: IecTaskConfig; busy: boolean }) {
-  const [showParams, setShowParams] = useState(false);
-  const paramKeys = Object.keys(task.params);
-  const hasParams = paramKeys.length > 0;
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0',
-      borderBottom: '1px solid #21262d',
-    }}>
-      {/* Toggle switch */}
-      <label style={{
-        position: 'relative', display: 'inline-block',
-        width: 28, height: 16, flexShrink: 0,
-      }}>
-        <input
-          type="checkbox"
-          checked={task.enabled}
-          disabled={busy}
-          onChange={() => setTaskConfig(task.name, { enabled: !task.enabled })}
-          style={{ opacity: 0, width: 0, height: 0 }}
-        />
-        <span style={{
-          position: 'absolute', cursor: busy ? 'default' : 'pointer',
-          top: 0, left: 0, right: 0, bottom: 0,
-          background: task.enabled ? '#238636' : '#30363d',
-          borderRadius: 8, transition: 'background 0.2s',
-        }}>
-          <span style={{
-            position: 'absolute',
-            height: 12, width: 12, left: task.enabled ? 14 : 2, top: 2,
-            background: '#e6edf3', borderRadius: '50%', transition: 'left 0.2s',
-          }} />
-        </span>
-      </label>
-
-      {/* Task name */}
-      <span style={{
-        fontSize: 11, color: task.enabled ? '#e6edf3' : '#484f58',
-        minWidth: 130, flexShrink: 0,
-      }}>
-        {task.display}
-      </span>
-
-      {/* Weight */}
-      <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#8b949e' }}>
-        w
-        <input
-          type="number"
-          value={task.weight}
-          disabled={busy}
-          onChange={e => {
-            const v = parseFloat(e.target.value);
-            if (!isNaN(v) && v >= 0) setTaskConfig(task.name, { weight: v });
-          }}
-          step="0.1" min="0" max="10"
-          style={{ ...inputStyle, width: 45, fontSize: 10, padding: '1px 3px' }}
-        />
-      </label>
-
-      {/* Params toggle */}
-      {hasParams && (
-        <button
-          onClick={() => setShowParams(!showParams)}
-          style={{ ...btn, fontSize: 9, padding: '1px 5px', color: '#8b949e', borderColor: '#30363d' }}
-        >
-          {showParams ? 'hide' : 'params'}
-        </button>
-      )}
-
-      {/* Inline params when expanded */}
-      {showParams && hasParams && (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {paramKeys.map(key => (
-            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 10, color: '#8b949e' }}>
-              {key}
-              <input
-                type="number"
-                value={task.params[key] as number}
-                disabled={busy}
-                onChange={e => {
-                  const v = parseFloat(e.target.value);
-                  if (!isNaN(v)) setTaskConfig(task.name, { params: { [key]: v } });
-                }}
-                step="0.01" min="0"
-                style={{ ...inputStyle, width: 55, fontSize: 10, padding: '1px 3px' }}
-              />
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 

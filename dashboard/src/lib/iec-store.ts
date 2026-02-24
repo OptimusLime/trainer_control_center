@@ -372,18 +372,36 @@ export async function fetchFeatureMaps() {
   }
 }
 
-/** Auto-setup: check if session exists, set up if not. */
+/** Auto-setup: check if session exists, set up if not.
+ *  Retries up to 5 times with 2s delay if trainer isn't ready yet. */
 export async function ensureIecSession() {
-  const state = await fetchJSON<IecState>('/iec/state');
-  if (state && state.active) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    // Check for existing session
+    const state = await fetchJSON<IecState>('/iec/state');
+    if (state && state.active) {
+      const prev = $iec.get();
+      $iec.set({ ...prev, state, setupLoading: false });
+      await fetchReconstructions();
+      await fetchCheckpoints();
+      await fetchFeatureMaps();
+      return;
+    }
+    // Try to create one
     const prev = $iec.get();
-    $iec.set({ ...prev, state });
-    await fetchReconstructions();
-    await fetchCheckpoints();
-    await fetchFeatureMaps();
-    return;
+    $iec.set({ ...prev, setupLoading: true, toast: null });
+    const result = await postJSON<IecSetupResponse>('/iec/setup');
+    if (result && result.state) {
+      const cur = $iec.get();
+      $iec.set({ ...cur, setupLoading: false, state: result.state, lossHistory: [] });
+      await fetchReconstructions();
+      await fetchCheckpoints();
+      await fetchFeatureMaps();
+      return;
+    }
+    // Trainer probably not ready — wait and retry
+    await new Promise(r => setTimeout(r, 2000));
   }
-  await setupIec();
-  await fetchCheckpoints();
-  await fetchFeatureMaps();
+  // All retries exhausted
+  const cur = $iec.get();
+  $iec.set({ ...cur, setupLoading: false, toast: 'Could not connect to trainer after 5 attempts' });
 }

@@ -80,19 +80,28 @@ class LayerGenome:
     kernel_size: int = 3
     stride: int = 1
     padding: int = 1
+    use_coords: bool = False  # whether X,Y,Gauss coords are concatenated to input
 
     @property
     def out_channels(self) -> int:
         return len(self.channel_descriptors)
 
+    @property
+    def coord_channels(self) -> int:
+        """Number of extra coord channels this layer receives (0 or 3)."""
+        return 3 if self.use_coords else 0
+
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "channel_descriptors": [cd.to_dict() for cd in self.channel_descriptors],
             "connection_mask": self.connection_mask,
             "kernel_size": self.kernel_size,
             "stride": self.stride,
             "padding": self.padding,
         }
+        if self.use_coords:
+            d["use_coords"] = True
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "LayerGenome":
@@ -104,6 +113,7 @@ class LayerGenome:
             kernel_size=d.get("kernel_size", 3),
             stride=d.get("stride", 1),
             padding=d.get("padding", 1),
+            use_coords=d.get("use_coords", False),
         )
 
 
@@ -139,44 +149,53 @@ class ConvCPPNGenome:
 
 
 def default_genome() -> ConvCPPNGenome:
-    """Simplest possible ConvCPPN. 1 channel everywhere.
+    """Simplest possible ConvCPPN. 1 channel everywhere. Coords OFF by default.
 
-    Encoder: 4→1 identity, stride=2 (28→14). Pool to 3x3. Latent = 1*9 = 9.
+    Encoder: 1→1 relu, stride=2 (28→14). Pool to 3x3. Latent = 1*9 = 9.
     Decoder: 3 layers, 1 channel each, progressive upsample 3→7→14→28.
+             Interior decoder layers use identity (linear) activation to
+             prevent dying-relu collapse in narrow architectures. The output
+             layer uses sigmoid to bound output to (0,1).
              The human grows it from here.
     """
     encoder_layer = LayerGenome(
         channel_descriptors=[ChannelDescriptor(activation="relu")],
-        connection_mask=[[1, 1, 1, 1]],  # 1 output × 4 inputs
+        connection_mask=[[1]],  # 1 output × 1 input (image only, no coords)
         kernel_size=3,
         stride=2,
         padding=1,
+        use_coords=False,
     )
-    # Decoder layer 0: 3→7. Input = 1 bottleneck + 3 coords = 4
+    # Decoder layer 0: 3→7. Input = 1 bottleneck (no coords)
+    # Identity (linear) activation for decoder interior prevents dying-relu
+    # collapse in narrow architectures. User can add relu channels later.
     dec_0 = LayerGenome(
-        channel_descriptors=[ChannelDescriptor(activation="relu")],
-        connection_mask=[[1, 1, 1, 1]],
+        channel_descriptors=[ChannelDescriptor(activation="identity")],
+        connection_mask=[[1]],
         kernel_size=3,
         stride=1,
         padding=1,
+        use_coords=False,
     )
-    # Decoder layer 1: 7→14. Input = 1 + 3 coords = 4
+    # Decoder layer 1: 7→14. Input = 1 (no coords)
     dec_1 = LayerGenome(
-        channel_descriptors=[ChannelDescriptor(activation="relu")],
-        connection_mask=[[1, 1, 1, 1]],
+        channel_descriptors=[ChannelDescriptor(activation="identity")],
+        connection_mask=[[1]],
         kernel_size=3,
         stride=1,
         padding=1,
+        use_coords=False,
     )
-    # Decoder layer 2: 14→28. Input = 1 + 3 coords = 4. Output = 1ch sigmoid.
+    # Decoder layer 2: 14→28. Input = 1. Output = 1ch sigmoid.
     # Sigmoid on the output layer bounds output to (0,1) matching MNIST range,
     # preventing zero-collapse under MSE loss.
     dec_2 = LayerGenome(
         channel_descriptors=[ChannelDescriptor(activation="sigmoid")],
-        connection_mask=[[1, 1, 1, 1]],
+        connection_mask=[[1]],
         kernel_size=3,
         stride=1,
         padding=1,
+        use_coords=False,
     )
     return ConvCPPNGenome(
         encoder_layers=[encoder_layer],
@@ -298,6 +317,9 @@ class ConvCPPNLayer(nn.Module):
         else:
             mask = connection_mask.float()
 
+        # Track whether mask is all-ones — skip multiply in forward/grad if so
+        self._mask_is_identity = bool(mask.all().item())
+
         if transpose:
             # ConvTranspose2d weight: [C_in, C_out, K, K] → mask needs [C_in, C_out]
             mask_4d = mask.T.unsqueeze(-1).unsqueeze(-1)
@@ -315,12 +337,28 @@ class ConvCPPNLayer(nn.Module):
             i for i, d in enumerate(channel_descriptors) if d.frozen
         ]
 
+        # Better weight initialization:
+        # - Xavier for bounded activations (sigmoid/tanh) — prevents saturation
+        # - Kaiming (default) for ReLU-like
+        # - Small positive bias for ReLU channels to prevent dead-on-init
+        bounded_acts = {"sigmoid", "tanh"}
+        relu_like_acts = {"relu", "softplus", "abs"}
+        if any(d.activation in bounded_acts for d in channel_descriptors):
+            nn.init.xavier_uniform_(self.conv.weight)
+
+        with torch.no_grad():
+            for i, d in enumerate(channel_descriptors):
+                if d.activation in relu_like_acts:
+                    # Small positive bias prevents dying ReLU in narrow architectures
+                    self.conv.bias.data[i] = 0.01
+
         # Initialize pass-through channels
         self._init_passthroughs()
 
-        # Zero masked weights at init
-        with torch.no_grad():
-            self.conv.weight.data *= self.conn_mask
+        # Zero masked weights at init (skip if mask is all-ones)
+        if not self._mask_is_identity:
+            with torch.no_grad():
+                self.conv.weight.data *= self.conn_mask
 
     def _init_passthroughs(self):
         """Set pass-through channels to identity kernel."""
@@ -334,8 +372,12 @@ class ConvCPPNLayer(nn.Module):
                     self.conv.bias.data[i] = 0.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply connection mask to weights
-        weight = self.conv.weight * self.conn_mask
+        # Apply connection mask to weights (skip if mask is all-ones for perf + gradient cleanliness)
+        weight = (
+            self.conv.weight
+            if self._mask_is_identity
+            else self.conv.weight * self.conn_mask
+        )
 
         if self.is_transpose:
             out = F.conv_transpose2d(
@@ -359,7 +401,9 @@ class ConvCPPNLayer(nn.Module):
         Call after loss.backward(), before optimizer.step().
         """
         if self.conv.weight.grad is not None:
-            self.conv.weight.grad *= self.conn_mask
+            # Only multiply by mask if mask has zeros (skip for all-ones masks)
+            if not self._mask_is_identity:
+                self.conv.weight.grad *= self.conn_mask
             for i in self.frozen_channels:
                 self.conv.weight.grad[i].zero_()
                 if self.conv.bias.grad is not None:
@@ -393,8 +437,11 @@ class ConvCPPN(nn.Module):
 
         # Build encoder layers
         self.encoder_layers = nn.ModuleList()
-        enc_in = 4  # image (1) + coords (3)
-        for lg in genome.encoder_layers:
+        enc_in = 1  # image only (no coords by default)
+        for i, lg in enumerate(genome.encoder_layers):
+            if i == 0:
+                # First encoder layer: input = image (1) + optional coords
+                enc_in = 1 + lg.coord_channels
             mask = torch.tensor(lg.connection_mask, dtype=torch.float32)
             layer = ConvCPPNLayer(
                 in_channels=enc_in,
@@ -414,8 +461,10 @@ class ConvCPPN(nn.Module):
         # Build decoder layers — using regular conv (not transpose) with interpolation
         # This is simpler and more controllable than transposed conv math
         self.decoder_layers = nn.ModuleList()
-        # First decoder input: bottleneck channels + 3 coord channels
-        dec_in = self._bottleneck_channels + 3
+        # First decoder input: bottleneck channels + optional coord channels
+        dec_in = self._bottleneck_channels + (
+            genome.decoder_layers[0].coord_channels if genome.decoder_layers else 0
+        )
         for i, lg in enumerate(genome.decoder_layers):
             is_last = i == len(genome.decoder_layers) - 1
             mask = torch.tensor(lg.connection_mask, dtype=torch.float32)
@@ -432,8 +481,9 @@ class ConvCPPN(nn.Module):
             if is_last:
                 dec_in = lg.out_channels  # won't be used
             else:
-                # Next decoder layer gets this output + 3 coord channels
-                dec_in = lg.out_channels + 3
+                # Next decoder layer gets this output + optional coord channels
+                next_lg = genome.decoder_layers[i + 1]
+                dec_in = lg.out_channels + next_lg.coord_channels
 
     # -- Model protocol --
 
@@ -482,9 +532,12 @@ class ConvCPPN(nn.Module):
         """
         B = x.shape[0]
 
-        # Encoder: concat coord channels to input
-        coords_28 = self._get_coords(28, B)
-        h = torch.cat([x, coords_28], dim=1)  # [B, 4, 28, 28]
+        # Encoder: optionally concat coord channels to input
+        if self._genome.encoder_layers[0].use_coords:
+            coords_28 = self._get_coords(28, B)
+            h = torch.cat([x, coords_28], dim=1)  # [B, 4, 28, 28]
+        else:
+            h = x  # [B, 1, 28, 28]
 
         for layer in self.encoder_layers:
             h = layer(h)
@@ -512,9 +565,10 @@ class ConvCPPN(nn.Module):
             # Upsample to target resolution
             target_res = _DECODER_RESOLUTIONS[i]
             h = F.interpolate(h, size=target_res, mode="bilinear", align_corners=False)
-            # Concatenate coord channels at this resolution
-            coords = self._get_coords(target_res, B)
-            h = torch.cat([h, coords], dim=1)
+            # Optionally concatenate coord channels at this resolution
+            if self._genome.decoder_layers[i].use_coords:
+                coords = self._get_coords(target_res, B)
+                h = torch.cat([h, coords], dim=1)
             h = layer(h)
 
         # Output is [B, 1, 28, 28] — activation applied by last decoder layer
@@ -587,7 +641,11 @@ class ConvCPPN(nn.Module):
             acts = ",".join(cd.activation for cd in lg.channel_descriptors)
             n_ch = lg.out_channels
             enc_parts.append(f"{n_ch}({acts})")
-        parts.append(f"Encoder: 4→{'→'.join(enc_parts)}")
+        first_enc = (
+            self._genome.encoder_layers[0] if self._genome.encoder_layers else None
+        )
+        enc_in = 1 + (first_enc.coord_channels if first_enc else 0)
+        parts.append(f"Encoder: {enc_in}→{'→'.join(enc_parts)}")
 
         # Bottleneck
         parts.append(f"Bottleneck: {self._bottleneck_channels}ch @ 3x3")
@@ -779,6 +837,51 @@ def remove_connection(
     return genome
 
 
+def toggle_coords(
+    genome: ConvCPPNGenome,
+    side: str,
+    layer_idx: int,
+) -> ConvCPPNGenome:
+    """Toggle coordinate channel injection for a specific layer.
+
+    When enabling coords: adds 3 columns to the layer's connection mask.
+    When disabling: removes the last 3 columns (coord columns).
+
+    For encoder layer 0: input goes from 1 (image) to 4 (image + X,Y,Gauss) or vice versa.
+    For decoder layers: input grows/shrinks by 3 (the coord channels for that layer).
+
+    Args:
+        genome: Source genome (not mutated).
+        side: 'encoder' or 'decoder'.
+        layer_idx: Which layer (0-indexed).
+
+    Returns:
+        New genome with toggled coords.
+    """
+    genome = copy.deepcopy(genome)
+    layers = genome.encoder_layers if side == "encoder" else genome.decoder_layers
+
+    if layer_idx < 0 or layer_idx >= len(layers):
+        raise ValueError(f"Layer index {layer_idx} out of range for {side}")
+
+    layer = layers[layer_idx]
+    old_coords = layer.use_coords
+    layer.use_coords = not old_coords
+
+    if layer.use_coords:
+        # Enabling: add 3 columns to connection mask (all connected)
+        for row in layer.connection_mask:
+            row.extend([1, 1, 1])
+    else:
+        # Disabling: remove last 3 columns from connection mask
+        for row in layer.connection_mask:
+            for _ in range(3):
+                if row:
+                    row.pop()
+
+    return genome
+
+
 def add_encoder_layer(
     genome: ConvCPPNGenome,
     position: int = -1,
@@ -814,9 +917,9 @@ def add_encoder_layer(
             f"Position {position} out of range for encoder (have {n_enc} layers)"
         )
 
-    # Determine input channels for the new layer
+    # Determine input channels for the new layer (new layers default to use_coords=False)
     if position == 0:
-        in_ch = 4  # image + coords
+        in_ch = 1  # image only (no coords by default for new layers)
     else:
         in_ch = genome.encoder_layers[position - 1].out_channels
 
@@ -830,6 +933,7 @@ def add_encoder_layer(
         kernel_size=3,
         stride=stride,
         padding=padding,
+        use_coords=False,
     )
 
     # Insert the new layer
@@ -875,17 +979,17 @@ def remove_encoder_layer(
         )
 
     # Determine what the next layer's input channels should become
-    if layer_idx == 0:
-        new_in_ch = 4  # image + coords
-    else:
-        new_in_ch = genome.encoder_layers[layer_idx - 1].out_channels
-
     # Remove the layer
     genome.encoder_layers.pop(layer_idx)
 
     # If there's a layer at layer_idx now (the one that was after), update its mask
     if layer_idx < len(genome.encoder_layers):
         next_layer = genome.encoder_layers[layer_idx]
+        if layer_idx == 0:
+            # It's now the first encoder layer: input = image + its own coords
+            new_in_ch = 1 + next_layer.coord_channels
+        else:
+            new_in_ch = genome.encoder_layers[layer_idx - 1].out_channels
         _resize_mask_columns(next_layer, new_in_ch)
 
     # Update first decoder layer input (bottleneck changed)
@@ -930,12 +1034,11 @@ def add_decoder_layer(
     if position < 0:
         position = 0
 
-    # Determine input channels for the new layer.
-    # Decoder inputs: layer 0 gets (bottleneck + 3 coords), layer i>0 gets (prev_out + 3 coords).
+    # Determine input channels for the new layer (no coords by default).
     if position == 0:
-        in_ch = genome.bottleneck_channels + 3
+        in_ch = genome.bottleneck_channels  # no coords for new layers
     else:
-        in_ch = genome.decoder_layers[position - 1].out_channels + 3
+        in_ch = genome.decoder_layers[position - 1].out_channels  # no coords
 
     # Build the new layer
     descs = [ChannelDescriptor(activation=activation) for _ in range(channels)]
@@ -946,15 +1049,16 @@ def add_decoder_layer(
         kernel_size=3,
         stride=1,
         padding=1,
+        use_coords=False,
     )
 
     # Insert
     genome.decoder_layers.insert(position, new_layer)
 
-    # Update the NEXT layer's connection mask (it now receives new_layer's output + 3 coords)
+    # Update the NEXT layer's connection mask (it now receives new_layer's output + its own coord channels)
     if position + 1 < len(genome.decoder_layers):
         next_layer = genome.decoder_layers[position + 1]
-        _resize_mask_columns(next_layer, channels + 3)  # output channels + 3 coords
+        _resize_mask_columns(next_layer, channels + next_layer.coord_channels)
 
     return genome
 
@@ -993,18 +1097,19 @@ def remove_decoder_layer(
             "Remove an earlier layer instead."
         )
 
-    # Determine what the next layer's input channels should become
-    if layer_idx == 0:
-        new_in_ch = genome.bottleneck_channels + 3  # bottleneck + coords
-    else:
-        new_in_ch = genome.decoder_layers[layer_idx - 1].out_channels + 3
-
     # Remove the layer
     genome.decoder_layers.pop(layer_idx)
 
     # Update the layer that was after the removed one
     if layer_idx < len(genome.decoder_layers):
         next_layer = genome.decoder_layers[layer_idx]
+        if layer_idx == 0:
+            new_in_ch = genome.bottleneck_channels + next_layer.coord_channels
+        else:
+            new_in_ch = (
+                genome.decoder_layers[layer_idx - 1].out_channels
+                + next_layer.coord_channels
+            )
         _resize_mask_columns(next_layer, new_in_ch)
 
     return genome
@@ -1026,12 +1131,13 @@ def _resize_mask_columns(layer: LayerGenome, new_in_ch: int) -> None:
 def _sync_decoder_input_to_bottleneck(genome: ConvCPPNGenome) -> None:
     """Sync first decoder layer's connection mask to current bottleneck channels.
 
-    The first decoder layer receives [bottleneck_channels + 3 coords] as input.
+    The first decoder layer receives [bottleneck_channels + coord_channels] as input.
     """
     if not genome.decoder_layers:
         return
-    expected_in = genome.bottleneck_channels + 3
-    _resize_mask_columns(genome.decoder_layers[0], expected_in)
+    first_dec = genome.decoder_layers[0]
+    expected_in = genome.bottleneck_channels + first_dec.coord_channels
+    _resize_mask_columns(first_dec, expected_in)
 
 
 def _propagate_output_change(genome: ConvCPPNGenome, side: str, layer_idx: int) -> None:
@@ -1053,26 +1159,25 @@ def _propagate_output_change(genome: ConvCPPNGenome, side: str, layer_idx: int) 
         if layer_idx == len(layers) - 1:
             _sync_decoder_input_to_bottleneck(genome)
     else:
-        # Decoder: next decoder layer input = this layer's output + 3 coords
+        # Decoder: next decoder layer input = this layer's output + next layer's coord channels
         if layer_idx < len(layers) - 1:
-            _resize_mask_columns(layers[layer_idx + 1], new_out + 3)
+            next_layer = layers[layer_idx + 1]
+            _resize_mask_columns(next_layer, new_out + next_layer.coord_channels)
 
 
 def _grow_decoder_input(genome: ConvCPPNGenome) -> None:
     """After adding an encoder output channel, grow the first decoder layer's input.
 
-    The first decoder layer sees [bottleneck_channels + 3 coords] as input.
-    We add a column to its connection mask (all ones = connected to new channel).
+    The first decoder layer sees [bottleneck_channels + coord_channels] as input.
+    We add a column to its connection mask for the new bottleneck channel.
     """
     if not genome.decoder_layers:
         return
     dec_layer = genome.decoder_layers[0]
+    n_coords = dec_layer.coord_channels
     for row in dec_layer.connection_mask:
-        # Insert before the last 3 entries (which are coord channels)
-        # Actually — the mask is [C_out, C_in] where C_in = bottleneck + 3.
-        # The new bottleneck channel is the last one before coords.
-        # We insert a 1 at position -3 (before X, Y, Gauss).
-        row.insert(len(row) - 3, 1)
+        # Insert before the coord entries (if any) at the end
+        row.insert(len(row) - n_coords, 1)
 
 
 def _shrink_decoder_input(genome: ConvCPPNGenome, removed_channel_idx: int) -> None:
