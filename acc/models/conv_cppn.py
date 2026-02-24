@@ -146,7 +146,7 @@ def default_genome() -> ConvCPPNGenome:
              The human grows it from here.
     """
     encoder_layer = LayerGenome(
-        channel_descriptors=[ChannelDescriptor(activation="identity")],
+        channel_descriptors=[ChannelDescriptor(activation="relu")],
         connection_mask=[[1, 1, 1, 1]],  # 1 output × 4 inputs
         kernel_size=3,
         stride=2,
@@ -168,9 +168,9 @@ def default_genome() -> ConvCPPNGenome:
         stride=1,
         padding=1,
     )
-    # Decoder layer 2: 14→28. Input = 1 + 3 coords = 4. Output = 1ch identity.
+    # Decoder layer 2: 14→28. Input = 1 + 3 coords = 4. Output = 1ch relu.
     dec_2 = LayerGenome(
-        channel_descriptors=[ChannelDescriptor(activation="identity")],
+        channel_descriptors=[ChannelDescriptor(activation="relu")],
         connection_mask=[[1, 1, 1, 1]],
         kernel_size=3,
         stride=1,
@@ -192,7 +192,7 @@ def make_coord_channels(H: int, W: int) -> torch.Tensor:
     ys = torch.linspace(-1, 1, H)
     xs = torch.linspace(-1, 1, W)
     grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-    gauss = torch.exp(-(grid_x**2 + grid_y**2) / 2.0)
+    gauss = torch.exp(-(grid_x**2 + grid_y**2) / 1.0)
     return torch.stack([grid_x, grid_y, gauss], dim=0)
 
 

@@ -76,6 +76,7 @@ class IECSession:
         self.last_loss: Optional[float] = None
         self.undo_stack: list[tuple[dict, dict]] = []  # (genome_dict, state_dict)
         self._lr: float = 1e-3
+        self.ssim_weight: float = 1.0  # L1 + ssim_weight * (1 - SSIM)
 
     def setup(
         self,
@@ -110,7 +111,7 @@ class IECSession:
 
     def _build_trainer(self):
         """(Re)build the trainer with current model and dataset."""
-        task = ReconstructionTask("recon", self.dataset)
+        task = ReconstructionTask("recon", self.dataset, ssim_weight=self.ssim_weight)
         task.attach(self.model)
         self.trainer = Trainer(
             self.model,
@@ -119,6 +120,12 @@ class IECSession:
             lr=self._lr,
             batch_size=128,
         )
+
+    def set_ssim_weight(self, weight: float):
+        """Update SSIM loss weight and rebuild trainer."""
+        self.ssim_weight = weight
+        if self.model is not None:
+            self._build_trainer()
 
     def get_state(self) -> dict:
         """Current session state for the API."""
@@ -132,6 +139,7 @@ class IECSession:
             "undo_depth": len(self.undo_stack),
             "activation_names": ACTIVATION_NAMES,
             "resolutions": self.model.resolution_info() if self.model else None,
+            "ssim_weight": self.ssim_weight,
         }
 
     def get_reconstructions(self, n: int = 8, normalize: bool = False) -> dict:
@@ -431,59 +439,69 @@ class IECSession:
     # -- Feature Maps (M-IEC-4) --
 
     def get_feature_maps(self, n: int = 1) -> dict:
-        """Extract per-channel feature maps from all layers via forward hooks.
+        """Extract per-channel feature maps AND gradients from all layers.
 
-        Runs inference on n images and captures each ConvCPPNLayer's output.
-        Returns per-channel activations as 2D number arrays (for InspectHeatmap).
+        Runs a forward pass, computes L1 reconstruction loss, then backward
+        pass to get gradients on each layer's output activations. The gradient
+        maps show what SGD wants to change at each spatial location per channel.
 
         Args:
-            n: Number of images to run (returns feature maps for the first one).
+            n: Number of images to run (returns maps for the first one).
 
         Returns:
             {
                 "input_image": "base64_png",
-                "encoder": [
-                    {
-                        "name": "enc_0",
-                        "resolution": [H, W],
-                        "channels": [
-                            {"activation": "identity", "data": [[...], ...]},
-                            ...
-                        ]
-                    },
-                    ...
-                ],
+                "loss": float,
+                "encoder": [ { "name", "resolution", "channels": [
+                    { "activation", "data": [[...]], "grad": [[...]] }, ...
+                ] } ],
+                "latent": { same structure } | null,
                 "decoder": [ same structure ],
             }
         """
         if self.model is None or self.dataset is None:
             raise RuntimeError("No active IEC session")
 
+        # We need gradients on intermediate activations, so we use hooks that
+        # retain_grad() on outputs instead of detaching them.
         activations: dict[str, torch.Tensor] = {}
         hooks = []
 
-        # Register forward hooks on all ConvCPPNLayers
+        def _make_hook(name: str):
+            def hook_fn(mod, inp, out):
+                out.retain_grad()
+                activations[name] = out
+
+            return hook_fn
+
         for i, layer in enumerate(self.model.encoder_layers):
-            name = f"enc_{i}"
-
-            def hook_fn(mod, inp, out, name=name):
-                activations[name] = out.detach()
-
-            hooks.append(layer.register_forward_hook(hook_fn))
+            hooks.append(layer.register_forward_hook(_make_hook(f"enc_{i}")))
 
         for i, layer in enumerate(self.model.decoder_layers):
-            name = f"dec_{i}"
+            hooks.append(layer.register_forward_hook(_make_hook(f"dec_{i}")))
 
-            def hook_fn(mod, inp, out, name=name):
-                activations[name] = out.detach()
+        hooks.append(self.model.pool.register_forward_hook(_make_hook("latent")))
 
-            hooks.append(layer.register_forward_hook(hook_fn))
-
-        # Run forward pass
+        # Forward pass WITH gradients
         self.model.eval()
-        with torch.no_grad():
-            images = self.dataset.sample(n).to(self.device)
-            self.model(images)
+        self.model.zero_grad()
+        images = self.dataset.sample(n).to(self.device)
+        output = self.model(images)
+
+        # Compute same loss as training: L1 + ssim_weight * (1 - SSIM)
+        from acc.tasks.reconstruction import ssim_loss as _ssim_loss
+
+        recon = output[ModelOutput.RECONSTRUCTION]
+        l1 = nn.functional.l1_loss(recon, images)
+        loss = l1
+        if self.ssim_weight > 0:
+            recon_clamped = recon.clamp(0, 1)
+            loss = loss + self.ssim_weight * _ssim_loss(recon_clamped, images)
+        loss_val = loss.item()
+        l1_val = l1.item()
+
+        # Backward to get gradients on all retained activations
+        loss.backward()
 
         # Remove hooks
         for h in hooks:
@@ -492,7 +510,49 @@ class IECSession:
         self.model.train()
 
         # Build response — use first image
-        input_img = _tensor_to_base64(images[0])
+        input_img = _tensor_to_base64(images[0].detach())
+        recon_img = _tensor_to_base64(recon[0].detach())
+
+        # Per-pixel L1 error: |reconstruction - input| for the first image
+        # This is [1, 28, 28] → squeeze to [28, 28]
+        pixel_error = (recon[0] - images[0]).abs().detach().squeeze(0)
+        error_map = pixel_error.cpu().numpy().tolist()
+
+        # Collect conv layers for kernel extraction
+        conv_layers: dict[str, nn.Module] = {}
+        for i, layer in enumerate(self.model.encoder_layers):
+            conv_layers[f"enc_{i}"] = layer
+        for i, layer in enumerate(self.model.decoder_layers):
+            conv_layers[f"dec_{i}"] = layer
+
+        def _extract_kernels(
+            layer_name: str, out_ch: int
+        ) -> list[list[list[float]]] | None:
+            """Extract masked kernel weights for a given output channel.
+
+            Returns list of 2D arrays — one KxK kernel per input channel
+            (only connected inputs, i.e. mask==1).
+            """
+            lyr = conv_layers.get(layer_name)
+            if lyr is None:
+                return None
+            w = lyr.conv.weight.detach()  # [C_out, C_in, K, K] or transpose
+            mask = lyr.conn_mask.detach()  # [C_out, C_in, 1, 1] or transpose
+            if lyr.is_transpose:
+                # Transpose conv: weight is [C_in, C_out, K, K], mask is [C_in, C_out, 1, 1]
+                # For output channel out_ch, kernels are w[:, out_ch, :, :]
+                kernels = []
+                for in_ch in range(w.shape[0]):
+                    if mask[in_ch, out_ch, 0, 0].item() > 0:
+                        kernels.append(w[in_ch, out_ch].cpu().numpy().tolist())
+                return kernels if kernels else None
+            else:
+                # Regular conv: weight is [C_out, C_in, K, K], mask is [C_out, C_in, 1, 1]
+                kernels = []
+                for in_ch in range(w.shape[1]):
+                    if mask[out_ch, in_ch, 0, 0].item() > 0:
+                        kernels.append(w[out_ch, in_ch].cpu().numpy().tolist())
+                return kernels if kernels else None
 
         def _layer_maps(prefix: str, genome_layers, count: int) -> list:
             result = []
@@ -501,23 +561,30 @@ class IECSession:
                 act_tensor = activations.get(name)
                 if act_tensor is None:
                     continue
-                # act_tensor is [B, C, H, W] — take first image
-                per_image = act_tensor[0]  # [C, H, W]
+                per_image = act_tensor[0].detach()  # [C, H, W]
+                grad_tensor = act_tensor.grad
+                per_grad = grad_tensor[0].detach() if grad_tensor is not None else None
                 C, H, W = per_image.shape
                 channels = []
                 for c in range(C):
-                    ch_data = per_image[c].cpu().numpy().tolist()  # [[...], ...]
+                    ch_data = per_image[c].cpu().numpy().tolist()
+                    ch_grad = (
+                        per_grad[c].cpu().numpy().tolist()
+                        if per_grad is not None
+                        else None
+                    )
                     act_name = (
                         genome_layers[i].channel_descriptors[c].activation
                         if c < len(genome_layers[i].channel_descriptors)
                         else "?"
                     )
-                    channels.append(
-                        {
-                            "activation": act_name,
-                            "data": ch_data,
-                        }
-                    )
+                    entry: dict = {"activation": act_name, "data": ch_data}
+                    if ch_grad is not None:
+                        entry["grad"] = ch_grad
+                    kernels = _extract_kernels(name, c)
+                    if kernels is not None:
+                        entry["kernels"] = kernels
+                    channels.append(entry)
                 result.append(
                     {
                         "name": name,
@@ -527,11 +594,48 @@ class IECSession:
                 )
             return result
 
+        # Build latent (post-pool) feature map + gradient
+        latent_maps = None
+        latent_tensor = activations.get("latent")
+        if latent_tensor is not None:
+            per_image = latent_tensor[0].detach()
+            grad_tensor = latent_tensor.grad
+            per_grad = grad_tensor[0].detach() if grad_tensor is not None else None
+            C, H, W = per_image.shape
+            channels = []
+            last_enc = (
+                self.genome.encoder_layers[-1] if self.genome.encoder_layers else None
+            )
+            for c in range(C):
+                ch_data = per_image[c].cpu().numpy().tolist()
+                ch_grad = (
+                    per_grad[c].cpu().numpy().tolist() if per_grad is not None else None
+                )
+                act_name = (
+                    last_enc.channel_descriptors[c].activation
+                    if last_enc and c < len(last_enc.channel_descriptors)
+                    else "?"
+                )
+                entry: dict = {"activation": act_name, "data": ch_data}
+                if ch_grad is not None:
+                    entry["grad"] = ch_grad
+                channels.append(entry)
+            latent_maps = {
+                "name": "latent",
+                "resolution": [H, W],
+                "channels": channels,
+            }
+
         return {
             "input_image": input_img,
+            "recon_image": recon_img,
+            "error_map": error_map,
+            "loss": loss_val,
+            "l1": l1_val,
             "encoder": _layer_maps(
                 "enc", self.genome.encoder_layers, len(self.model.encoder_layers)
             ),
+            "latent": latent_maps,
             "decoder": _layer_maps(
                 "dec", self.genome.decoder_layers, len(self.model.decoder_layers)
             ),

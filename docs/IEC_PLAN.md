@@ -317,24 +317,66 @@ Tasks:
 
 **Verification:** Train 50 steps, save as "test-50". Add cos channel, train 50 more, save as "2ch-cos-100". Load "test-50" — architecture reverts to 1 channel, latent=9, step=50. Load "2ch-cos-100" — back to 2 channels. Feature maps show 1 heatmap per encoder channel (14x14) and 1 per decoder channel (7x7, 14x14, 28x28). Verified via API + browser.
 
-### Phase 5: Architecture Graph + Comparison (M-IEC-5)
+### Phase 5: Architecture Graph + Feature Visualization (M-IEC-5) --- COMPLETED
 
 **NOTE:** This phase is critical for usability. The genome JSON is unreadable — the human needs a topological graph to understand what they're building. Prioritize the DAG renderer before comparison features.
 
-**Functionality:** I can see the CPPN topology as a visual DAG (channels as nodes, connections as edges), click any channel to see its feature map, and compare two checkpoints side-by-side.
+**Functionality:** I can see the CPPN topology as a visual DAG (channels as nodes, connections as edges), click any channel to see its feature map, gradient map, and per-input kernels. Horizontal feature map strip shows input (image + X + Y + Gauss), encoder, latent, decoder, and output columns. Output column shows reconstruction + per-pixel L1 error map + gradient. Loss (L1 and total) displayed in feature map header.
 
-**Foundation:** `IecArchGraph.tsx` canvas component (reusable DAG renderer). `POST /iec/compare` endpoint. Checkpoint tree visualization.
+**Foundation:** `IecArchGraph.tsx` SVG DAG renderer (layers as columns, channels as colored circles, connections as lines, coord diamonds, click-to-select). SSIM loss implementation in `ReconstructionTask` with configurable `ssim_weight`. Gradient maps per channel via backward pass. Kernel visualization per channel. Feature maps auto-load on session start.
 
 Tasks:
-1. `IecArchGraph.tsx` — canvas-rendered DAG:
+1. `IecArchGraph.tsx` — SVG DAG renderer:
    - Layers as columns, channels as circles within each column
    - Color-coded by activation type (sin=purple, cos=blue, tanh=green, relu=red, etc.)
-   - Connections as lines between circles. Disabled connections as dashed/faded.
-   - Click channel → highlight and show its feature map heatmap below
-2. `POST /iec/compare` endpoint — given two checkpoint IDs, return side-by-side reconstructions and per-channel feature maps for both
-3. Checkpoint tree visualization in the sidebar (reuse pattern from main dashboard's checkpoint tree)
+   - Coordinate inputs shown as diamonds
+   - Connections as lines between circles. Click channel → highlight.
+2. Horizontal feature map strip below graph — input (img+X+Y+Gauss), encoder, latent, decoder, output columns
+3. Gradient maps per channel (red/blue diverging heatmap via backward pass on loss)
+4. Kernel visualization per channel (green/purple diverging heatmap, per-input KxK kernels)
+5. Output column: reconstruction image + per-pixel L1 error map + gradient
+6. Loss display in feature map header (both L1 and total)
+7. SSIM loss implementation in `ReconstructionTask` with configurable `ssim_weight` parameter
+8. SSIM weight slider in sticky top bar
+9. Feature maps auto-load on session start, clicking channels only highlights (no re-fetch)
+10. Sticky training controls bar
 
-**Verification:** Graph renders the 4→1 encoder topology correctly. After adding 3 channels with different activations, graph shows 4 input → 3 hidden with connection lines. Clicking a channel shows its 28x28 activation heatmap for the current batch. Comparing two checkpoints shows their reconstructions side by side.
+**Verification:** Graph renders the 4→1 encoder topology correctly. After adding 3 channels with different activations, graph shows 4 input → 3 hidden with connection lines. Clicking a channel highlights it and shows its feature map in the strip below. Gradient maps show red/blue heatmaps. Kernel visualization shows per-input KxK grids. Output column shows reconstruction + error map. SSIM weight slider adjusts the loss formula.
+
+### Phase 6: Kernel Editing + Selective Freezing (M-IEC-6)
+
+**NOTE:** This phase gives the human direct control over individual conv kernels — the lowest-level weights in the network. Combined with the architecture graph and feature maps, this makes the human a true weight-level optimizer: they can see what each kernel detects, decide to keep it, freeze it, or manually set it to a known pattern (edge detector, Gabor filter, identity, etc.).
+
+**Functionality:** I can click any channel in the architecture graph or feature map view and see its per-input kernels. I can freeze any individual channel so SGD leaves it alone during training. I can manually edit a kernel's values via a clickable grid or select from preset patterns (identity, horizontal edge, vertical edge, Gabor, blur, sharpen). After editing, I train — frozen channels stay fixed while SGD optimizes the rest.
+
+**Foundation:** `POST /iec/freeze_channel` and `POST /iec/unfreeze_channel` endpoints. `POST /iec/set_kernel` endpoint for manual kernel editing. `ChannelDescriptor.frozen` field already exists in the genome. `ConvCPPNLayer.zero_masked_grads()` already zeros frozen channel gradients. Frontend: `KernelEditor` component with clickable weight cells and preset patterns.
+
+Tasks:
+1. Backend — freeze/unfreeze:
+   - `IECSession.freeze_channel(side, layer_idx, channel_idx)` — sets `genome.channel_descriptors[i].frozen = True`, rebuilds model (or toggles in-place since frozen is handled in `zero_masked_grads`)
+   - `IECSession.unfreeze_channel(...)` — reverse
+   - `POST /iec/freeze_channel` and `POST /iec/unfreeze_channel` endpoints
+   - Verify: frozen channels have zero gradient after backward, weights unchanged after training steps
+2. Backend — kernel editing:
+   - `IECSession.set_kernel(side, layer_idx, out_ch, in_ch, values: list[list[float]])` — directly sets `conv.weight[out_ch, in_ch]` to provided 2D values
+   - `POST /iec/set_kernel` endpoint with body `{ side, layer_idx, out_ch, in_ch, values: [[...]] }`
+   - Preset kernel library: `KERNEL_PRESETS = { "identity": [[0,0,0],[0,1,0],[0,0,0]], "h_edge": [[-1,-1,-1],[0,0,0],[1,1,1]], "v_edge": [[-1,0,1],[-1,0,1],[-1,0,1]], "blur": [[1,1,1],[1,1,1],[1,1,1]] / 9, "sharpen": [[0,-1,0],[-1,5,-1],[0,-1,0]], "diagonal": [[1,0,0],[0,1,0],[0,0,1]] / 3 }` in `acc/models/conv_cppn.py`
+   - `POST /iec/set_kernel_preset` endpoint with body `{ side, layer_idx, out_ch, in_ch, preset: str }`
+3. Frontend — freeze toggle:
+   - Freeze/unfreeze icon on each `ChannelPill` (snowflake icon or lock)
+   - Frozen channels shown with a distinct visual (e.g. blue border, lock icon)
+   - Frozen channels' kernels shown with a "frozen" overlay in the feature map strip
+4. Frontend — kernel editor:
+   - `KernelEditor.tsx` — clickable grid where each cell is an input field or drag-to-set
+   - Preset buttons (identity, h_edge, v_edge, blur, sharpen)
+   - Opens when clicking a kernel in the feature map strip
+   - "Apply" button sends `POST /iec/set_kernel`, refreshes feature maps
+5. Integration:
+   - After setting a kernel manually, auto-freeze that channel (human intent should be preserved)
+   - Undo stack captures pre-edit state (kernel values + frozen state)
+   - Feature map display shows frozen channels with visual indicator
+
+**Verification:** Open `/iec`. Train 50 steps. Click enc_0 ch0's first kernel in the feature map strip — kernel editor opens showing 3x3 grid. Click "h_edge" preset — kernel values update to horizontal edge detector. Feature map refreshes showing horizontal edge responses. Channel is auto-frozen (lock icon visible). Train 50 more steps — enc_0 ch0 weights unchanged (verify via feature map refresh), other channels trained normally. Unfreeze, train 50 more — enc_0 ch0 evolves away from edge detector. The human can sculpt individual kernels and protect them from SGD.
 
 ## Directory Structure (Anticipated)
 
@@ -384,7 +426,7 @@ dashboard/src/
 
 ## Phase Execution Order
 
-Phase 1 → 2 → 3 → 4 → 5
+Phase 1 → 2 → 3 → 4 → 5 → 6
 
 **Every phase is end-to-end.** Phase 1 delivers a working `/iec` page in the browser with the model, API, and UI wired together (stubs for training/mutation). Each subsequent phase fills in real functionality where stubs were, and each is verified in the browser.
 
@@ -392,8 +434,9 @@ Phase 1 → 2 → 3 → 4 → 5
 - After Phase 2: You can train the model and watch it learn. The core interactive loop works.
 - After Phase 3: You can mutate the architecture and undo. The human IS the search algorithm.
 - After Phase 4: You can save/load checkpoints and inspect feature maps. Persistence and diagnosis.
-- After Phase 5: You can see the topology as a graph and compare checkpoints. Polish.
+- After Phase 5: You can see the topology as a graph with feature maps, gradients, and kernels inline. Full diagnosis.
+- After Phase 6: You can freeze channels and manually edit kernels. The human controls both topology AND weights.
 
 ## Full Outcome
 
-After all phases: The human opens `/iec`, sees a minimal 1-channel autoencoder. They train it for 100 steps, see blurry reconstructions. They add a sin channel and a cos channel, train more, see spatial frequency patterns emerge. They save checkpoints at each stage, fork to try different activation combinations, compare results. They grow the network to 8-12 channels across 2-3 layers, each hand-picked based on what they see in the feature maps and reconstructions. The internal representation is organized because the human organized it — each channel was added with intent, trained with purpose, and kept because it earned its place.
+After all phases: The human opens `/iec`, sees a minimal 1-channel autoencoder. They train it for 100 steps, see blurry reconstructions. They add a sin channel and a cos channel, train more, see spatial frequency patterns emerge. They save checkpoints at each stage, fork to try different activation combinations, compare results. They grow the network to 8-12 channels across 2-3 layers, each hand-picked based on what they see in the feature maps and reconstructions. They can see exactly what each kernel detects, what SGD wants to change (gradient maps), and manually set kernels to known patterns (edge detectors, Gabor filters) then freeze them so SGD builds around their design. The internal representation is organized because the human organized it — each channel was added with intent, trained with purpose, kernels sculpted by hand, and kept because it earned its place.

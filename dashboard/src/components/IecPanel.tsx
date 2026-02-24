@@ -32,9 +32,12 @@ import {
   saveCheckpoint,
   loadCheckpoint,
   fetchFeatureMaps,
+  setSsimWeight,
 } from '../lib/iec-store';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer } from '../lib/iec-types';
+import IecArchGraph from './IecArchGraph';
+import type { ChannelSelection } from './IecArchGraph';
 
 export default function IecPanel() {
   const state = useStore($iecState);
@@ -48,7 +51,7 @@ export default function IecPanel() {
   const featureMaps = useStore($iecFeatureMaps);
   const [lr, setLr] = useState('0.01');
   const [cpTag, setCpTag] = useState('');
-  const [showFeatures, setShowFeatures] = useState(false);
+  const [selectedChannel, setSelectedChannel] = useState<ChannelSelection | null>(null);
 
   useEffect(() => { ensureIecSession(); }, []);
 
@@ -65,8 +68,13 @@ export default function IecPanel() {
     <div style={{ padding: '12px 0', position: 'relative' }}>
       {toast && <Toast message={toast} />}
 
-      {/* Top bar: stats + train + reset */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+      {/* Top bar: stats + train + reset — sticky so SGD controls are always accessible */}
+      <div style={{
+        position: 'sticky', top: 0, zIndex: 20,
+        background: '#0d1117', borderBottom: '1px solid #30363d',
+        padding: '6px 0', marginBottom: 8,
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
         <Stat label="Step" value={state.step} />
         <Stat label="Loss" value={state.last_loss != null ? state.last_loss.toFixed(4) : '--'} />
         <Stat label="Latent" value={state.latent_dim} />
@@ -77,6 +85,11 @@ export default function IecPanel() {
           lr
           <input type="number" value={lr} onChange={e => setLr(e.target.value)}
             step="0.001" min="0.0001" max="1" style={inputStyle} />
+        </label>
+        <label style={{ fontSize: 12, color: '#8b949e', display: 'flex', alignItems: 'center', gap: 4 }}>
+          SSIM
+          <input type="number" value={state.ssim_weight} onChange={e => setSsimWeight(parseFloat(e.target.value) || 0)}
+            step="0.1" min="0" max="5" style={{ ...inputStyle, width: 50 }} />
         </label>
         {[1, 10, 50, 100, 500].map(n => (
           <button key={n} onClick={() => stepIec(n, parseFloat(lr))} disabled={busy}
@@ -124,6 +137,42 @@ export default function IecPanel() {
           <div style={{ color: '#484f58', fontSize: 13 }}>Click a step button to train.</div>
         )}
       </div>
+
+      {/* Architecture Graph (DAG) + Feature Maps inline below */}
+      {genome && (
+        <div style={{ background: '#0d1117', border: '1px solid #21262d', borderRadius: 4, marginBottom: 8 }}>
+          <IecArchGraph
+            genome={genome}
+            resolutions={resolutions ?? null}
+            selected={selectedChannel}
+            onSelectChannel={setSelectedChannel}
+          />
+          {/* Feature maps directly beneath the graph */}
+          <div style={{ padding: '4px 10px 8px', borderTop: '1px solid #21262d' }}>
+            {featureMaps ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ ...dimText, fontWeight: 600, fontSize: 10 }}>Feature Maps</span>
+                  <span style={{ fontSize: 10, color: '#8b949e', fontFamily: 'monospace' }}>
+                    L1 <b style={{ color: '#e6edf3' }}>{featureMaps.l1.toFixed(4)}</b>
+                    {featureMaps.loss !== featureMaps.l1 && (
+                      <> total <b style={{ color: '#e6edf3' }}>{featureMaps.loss.toFixed(4)}</b></>
+                    )}
+                  </span>
+                  <button disabled={busy}
+                    onClick={() => fetchFeatureMaps()}
+                    style={{ ...btn, fontSize: 9, padding: '1px 5px' }}>
+                    Refresh
+                  </button>
+                </div>
+                <FeatureMapDisplay maps={featureMaps} selectedChannel={selectedChannel} />
+              </>
+            ) : (
+              <div style={{ ...dimText, fontSize: 10 }}>Loading feature maps...</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Architecture: Encoder + Decoder side by side */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
@@ -174,26 +223,7 @@ export default function IecPanel() {
         </div>
       </div>
 
-      {/* Feature Maps */}
-      <div style={{ ...card, marginBottom: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-          <span style={{ ...dimText, fontWeight: 600 }}>Feature Maps</span>
-          <button disabled={busy}
-            onClick={() => { fetchFeatureMaps(); setShowFeatures(true); }}
-            style={btn}>
-            {featureMaps ? 'Refresh' : 'Fetch'}
-          </button>
-          {featureMaps && (
-            <button onClick={() => setShowFeatures(!showFeatures)}
-              style={{ ...btn, fontSize: 10 }}>
-              {showFeatures ? 'Hide' : 'Show'}
-            </button>
-          )}
-        </div>
-        {showFeatures && featureMaps && (
-          <FeatureMapDisplay maps={featureMaps} />
-        )}
-      </div>
+      {/* Feature Maps now shown inline under the architecture graph above */}
 
       {/* Genome JSON collapse */}
       <details style={{ color: '#8b949e', fontSize: 11 }}>
@@ -223,9 +253,25 @@ function LayerStack({ title, subtitle, layers, side, activations, busy, isDecode
 
   return (
     <div style={card}>
-      <div style={{ marginBottom: 8 }}>
-        <div style={{ ...dimText, fontWeight: 600, fontSize: 12 }}>{title}</div>
-        <div style={{ ...dimText, fontSize: 10, marginTop: 1 }}>{subtitle}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div>
+          <div style={{ ...dimText, fontWeight: 600, fontSize: 12 }}>{title}</div>
+          <div style={{ ...dimText, fontSize: 10, marginTop: 1 }}>{subtitle}</div>
+        </div>
+        <div style={{ flex: 1 }} />
+        {/* Add Layer — pinned top-right so it never moves */}
+        <button
+          disabled={busy}
+          onClick={() => mutateIec('add_layer', {
+            side,
+            position: isDecoder ? layers.length - 1 : -1,
+            activation: 'relu',
+            channels: 2,
+          })}
+          style={{ ...btn, fontSize: 10, padding: '2px 8px', color: '#58a6ff', borderColor: '#1f6feb' }}
+        >
+          + Layer
+        </button>
       </div>
 
       {layers.map((layer, li) => {
@@ -246,22 +292,6 @@ function LayerStack({ title, subtitle, layers, side, activations, busy, isDecode
           />
         );
       })}
-
-      {/* Add Layer button */}
-      <div style={{ marginTop: 6 }}>
-        <button
-          disabled={busy}
-          onClick={() => mutateIec('add_layer', {
-            side,
-            position: isDecoder ? layers.length - 1 : -1,
-            activation: isDecoder ? 'relu' : 'identity',
-            channels: 2,
-          })}
-          style={{ ...btn, fontSize: 10, padding: '2px 8px', color: '#58a6ff', borderColor: '#1f6feb' }}
-        >
-          + Add Layer
-        </button>
-      </div>
     </div>
   );
 }
@@ -317,6 +347,22 @@ function LayerRow({ layer, side, layerIdx, activations, busy, canRemoveChannels,
         )}
       </div>
 
+      {/* Add channel controls — pinned above pills so they don't move */}
+      {!isLastDecoder && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginBottom: 3 }}>
+          <select value={addAct} onChange={e => setAddAct(e.target.value)}
+            style={{ ...selectStyle, fontSize: 10, padding: '1px 4px' }}>
+            {activations.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <button disabled={busy}
+            onClick={() => mutateIec('add_channel', { side, layer_idx: layerIdx, activation: addAct })}
+            style={{ ...pillBtn, background: '#1f6feb22', borderColor: '#1f6feb', color: '#58a6ff' }}
+            title={`Add ${addAct} channel`}>
+            + ch
+          </button>
+        </div>
+      )}
+
       {/* Channel pills */}
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
         {layer.channel_descriptors.map((ch, ci) => (
@@ -331,22 +377,6 @@ function LayerRow({ layer, side, layerIdx, activations, busy, canRemoveChannels,
             canRemove={canRemoveChannels}
           />
         ))}
-
-        {/* Add channel */}
-        {!isLastDecoder && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 4 }}>
-            <select value={addAct} onChange={e => setAddAct(e.target.value)}
-              style={{ ...selectStyle, fontSize: 10, padding: '1px 4px' }}>
-              {activations.map(a => <option key={a} value={a}>{a}</option>)}
-            </select>
-            <button disabled={busy}
-              onClick={() => mutateIec('add_channel', { side, layer_idx: layerIdx, activation: addAct })}
-              style={{ ...pillBtn, background: '#1f6feb22', borderColor: '#1f6feb', color: '#58a6ff' }}
-              title={`Add ${addAct} channel`}>
-              +
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -452,60 +482,190 @@ function LossChart({ losses }: { losses: number[] }) {
 
 /* -- Feature Map Display -- */
 
-function FeatureMapDisplay({ maps }: { maps: IecFeatureMaps }) {
+/**
+ * Horizontal feature map strip — each layer is a column in a flex row.
+ * Columns size to their content so nothing overlaps.
+ */
+function FeatureMapDisplay({ maps, selectedChannel }: {
+  maps: IecFeatureMaps;
+  selectedChannel: ChannelSelection | null;
+}) {
+  // Build ordered slots: Input | E0..En | Latent | D0..Dn(Out)
+  const slots: { layer: IecFeatureLayer | null; side: 'encoder' | 'decoder' | null; layerIdx: number; label: string }[] = [];
+
+  slots.push({ layer: null, side: null, layerIdx: -1, label: 'input' });
+  for (let i = 0; i < maps.encoder.length; i++) {
+    slots.push({ layer: maps.encoder[i], side: 'encoder', layerIdx: i, label: `E${i}` });
+  }
+  slots.push({ layer: maps.latent ?? null, side: null, layerIdx: -1, label: 'latent' });
+  for (let i = 0; i < maps.decoder.length; i++) {
+    slots.push({ layer: maps.decoder[i], side: 'decoder', layerIdx: i, label: maps.decoder.length - 1 === i ? 'Out' : `D${i}` });
+  }
+
   return (
-    <div>
-      {/* Input image */}
-      <div style={{ marginBottom: 6 }}>
-        <span style={{ ...dimText, fontSize: 10 }}>Input:</span>
-        <img src={`data:image/png;base64,${maps.input_image}`} width={56} height={56}
-          style={{ imageRendering: 'pixelated', border: '1px solid #30363d', background: '#000', display: 'block', marginTop: 2 }} />
-      </div>
+    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+      {slots.map((slot, si) => {
+        const highlight = selectedChannel && slot.side === selectedChannel.side && slot.layerIdx === selectedChannel.layerIdx
+          ? selectedChannel.channelIdx : null;
 
-      {/* Encoder layers */}
-      {maps.encoder.length > 0 && (
-        <div style={{ marginBottom: 6 }}>
-          <div style={{ ...dimText, fontSize: 10, fontWeight: 600, marginBottom: 4 }}>Encoder</div>
-          {maps.encoder.map(layer => (
-            <FeatureLayerRow key={layer.name} layer={layer} />
-          ))}
-        </div>
-      )}
-
-      {/* Decoder layers */}
-      {maps.decoder.length > 0 && (
-        <div>
-          <div style={{ ...dimText, fontSize: 10, fontWeight: 600, marginBottom: 4 }}>Decoder</div>
-          {maps.decoder.map(layer => (
-            <FeatureLayerRow key={layer.name} layer={layer} />
-          ))}
-        </div>
-      )}
+        return (
+          <div key={si} style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+            minWidth: 0,
+          }}>
+            {/* Column label */}
+            <span style={{ fontSize: 8, color: '#484f58', fontFamily: 'monospace', fontWeight: 600 }}>{slot.label}</span>
+            {slot.label === 'input' ? (
+              <InputColumnMaps inputImage={maps.input_image} />
+            ) : slot.label === 'Out' ? (
+              <OutputColumnMaps
+                layer={slot.layer}
+                reconImage={maps.recon_image}
+                errorMap={maps.error_map}
+                highlightChannel={highlight}
+              />
+            ) : slot.layer ? (
+              <FeatureColumnMaps layer={slot.layer} highlightChannel={highlight} />
+            ) : (
+              <span style={{ fontSize: 9, color: '#30363d' }}>--</span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function FeatureLayerRow({ layer }: { layer: IecFeatureLayer }) {
-  const [H, W] = layer.resolution;
-  // Scale display size — small features get bigger cells
-  const cellSize = Math.max(2, Math.min(8, Math.floor(112 / Math.max(H, W))));
-  const dispW = W * cellSize;
-  const dispH = H * cellSize;
+/** Generate coord channel data at given resolution. Deterministic. */
+function makeCoordData(size: number): { x: number[][]; y: number[][]; g: number[][] } {
+  const x: number[][] = [];
+  const y: number[][] = [];
+  const g: number[][] = [];
+  for (let r = 0; r < size; r++) {
+    const xRow: number[] = [];
+    const yRow: number[] = [];
+    const gRow: number[] = [];
+    const yv = -1 + (2 * r) / (size - 1);
+    for (let c = 0; c < size; c++) {
+      const xv = -1 + (2 * c) / (size - 1);
+      xRow.push(xv);
+      yRow.push(yv);
+      gRow.push(Math.exp(-(xv * xv + yv * yv) / 1.0));
+    }
+    x.push(xRow);
+    y.push(yRow);
+    g.push(gRow);
+  }
+  return { x, y, g };
+}
+
+const COORD_28 = makeCoordData(28);
+
+/** Input column: shows the input image + X, Y, Gaussian coord channels. */
+function InputColumnMaps({ inputImage }: { inputImage: string }) {
+  const sz = 40;
+  // MiniHeatmap size for 28x28 at cell=1 → 28px, but let's keep consistent
+  const cellSize = Math.max(1, Math.floor(sz / 28));
+  const dispW = 28 * cellSize;
+  const dispH = 28 * cellSize;
 
   return (
-    <div style={{ marginBottom: 6 }}>
-      <div style={{ fontSize: 10, color: '#484f58', marginBottom: 2 }}>
-        {layer.name} ({H}x{W}) — {layer.channels.length}ch
+    <>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <img src={`data:image/png;base64,${inputImage}`} width={dispW} height={dispH}
+          style={{ imageRendering: 'pixelated', border: '1px solid #30363d', background: '#000', display: 'block' }} />
+        <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>img</span>
       </div>
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {layer.channels.map((ch, ci) => (
-          <div key={ci} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-            <MiniHeatmap data={ch.data} width={dispW} height={dispH} />
-            <span style={{ fontSize: 9, color: '#8b949e', marginTop: 1 }}>{ch.activation}</span>
-          </div>
-        ))}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <MiniHeatmap data={COORD_28.x} width={dispW} height={dispH} />
+        <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>X</span>
       </div>
-    </div>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <MiniHeatmap data={COORD_28.y} width={dispW} height={dispH} />
+        <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>Y</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <MiniHeatmap data={COORD_28.g} width={dispW} height={dispH} />
+        <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>Gauss</span>
+      </div>
+    </>
+  );
+}
+
+/** Output column: reconstruction image + per-pixel error map. */
+function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel }: {
+  layer: IecFeatureLayer | null;
+  reconImage: string;
+  errorMap: number[][];
+  highlightChannel: number | null;
+}) {
+  const sz = 40;
+  const cellSize = Math.max(1, Math.floor(sz / 28));
+  const dispW = 28 * cellSize;
+  const dispH = 28 * cellSize;
+
+  return (
+    <>
+      {/* Reconstruction */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <img src={`data:image/png;base64,${reconImage}`} width={dispW} height={dispH}
+          style={{ imageRendering: 'pixelated', border: '1px solid #58a6ff', background: '#000', display: 'block' }} />
+        <span style={{ fontSize: 7, color: '#58a6ff', lineHeight: 1 }}>recon</span>
+      </div>
+      {/* Per-pixel L1 error: bright = high error */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <MiniHeatmap data={errorMap} width={dispW} height={dispH} />
+        <span style={{ fontSize: 7, color: '#f85149', lineHeight: 1 }}>error</span>
+      </div>
+      {/* Layer feature maps if present */}
+      {layer && layer.channels.map((ch, ci) => (
+        <div key={ci} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          border: highlightChannel === ci ? '2px solid #f0883e' : '2px solid transparent',
+          borderRadius: 3, padding: 0,
+        }}>
+          {ch.grad && <GradHeatmap data={ch.grad} width={dispW} height={dispH} />}
+          <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>grad</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** A single column of channel heatmaps stacked vertically.
+ *  Each channel: activation heatmap + gradient heatmap + kernel weights. */
+function FeatureColumnMaps({ layer, highlightChannel }: { layer: IecFeatureLayer; highlightChannel: number | null }) {
+  const [H, W] = layer.resolution;
+  const cellSize = Math.max(2, Math.min(5, Math.floor(40 / Math.max(H, W))));
+  const dispW = W * cellSize;
+  const dispH = H * cellSize;
+  // Kernel display: 3x3 kernels at a readable size
+  const kSize = 14; // px per kernel cell → 42px for a 3x3 kernel
+
+  return (
+    <>
+      {layer.channels.map((ch, ci) => (
+        <div key={ci} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          border: highlightChannel === ci ? '2px solid #f0883e' : '2px solid transparent',
+          borderRadius: 3, padding: 1, marginBottom: 3,
+        }}>
+          <MiniHeatmap data={ch.data} width={dispW} height={dispH} />
+          {ch.grad && (
+            <GradHeatmap data={ch.grad} width={dispW} height={dispH} />
+          )}
+          {/* Kernels: horizontal row of KxK weight patches */}
+          {ch.kernels && ch.kernels.length > 0 && (
+            <div style={{ display: 'flex', gap: 1, marginTop: 1 }}>
+              {ch.kernels.map((k, ki) => (
+                <KernelHeatmap key={ki} data={k} cellSize={kSize} />
+              ))}
+            </div>
+          )}
+          <span style={{ fontSize: 7, color: highlightChannel === ci ? '#f0883e' : '#484f58', lineHeight: 1 }}>{ch.activation}</span>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -553,6 +713,113 @@ function MiniHeatmap({ data, width, height }: { data: number[][]; width: number;
   return (
     <canvas ref={canvasRef} width={width} height={height}
       style={{ border: '1px solid #21262d', borderRadius: 2, display: 'block', imageRendering: 'pixelated' }} />
+  );
+}
+
+/** Canvas kernel weight heatmap — diverging purple (negative) / black (zero) / green (positive). */
+function KernelHeatmap({ data, cellSize }: { data: number[][]; cellSize: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rows = data.length;
+  const cols = data[0]?.length ?? 0;
+  const width = cols * cellSize;
+  const height = rows * cellSize;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || rows === 0 || cols === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    canvas.width = width;
+    canvas.height = height;
+
+    let absMax = 0;
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) {
+        const a = Math.abs(data[r][c]);
+        if (a > absMax) absMax = a;
+      }
+    if (absMax === 0) absMax = 1;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = data[r][c] / absMax; // -1 to +1
+        let R: number, G: number, B: number;
+        if (v >= 0) {
+          // Positive weight → green
+          R = Math.floor(v * 30);
+          G = Math.floor(v * 200);
+          B = Math.floor(v * 30);
+        } else {
+          // Negative weight → purple
+          const a = -v;
+          R = Math.floor(a * 160);
+          G = Math.floor(a * 20);
+          B = Math.floor(a * 200);
+        }
+        ctx.fillStyle = `rgb(${R},${G},${B})`;
+        ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+      }
+    }
+  }, [data, cellSize, width, height, rows, cols]);
+
+  return (
+    <canvas ref={canvasRef} width={width} height={height}
+      style={{ border: '1px solid #30363d', borderRadius: 1, display: 'block', imageRendering: 'pixelated' }} />
+  );
+}
+
+/** Canvas gradient heatmap — diverging blue (negative) / black (zero) / red (positive). */
+function GradHeatmap({ data, width, height }: { data: number[][]; width: number; height: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || data.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const rows = data.length;
+    const cols = data[0].length;
+    canvas.width = width;
+    canvas.height = height;
+    const cw = width / cols;
+    const ch = height / rows;
+
+    // Symmetric normalization around zero
+    let absMax = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const a = Math.abs(data[r][c]);
+        if (a > absMax) absMax = a;
+      }
+    }
+    if (absMax === 0) absMax = 1;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = data[r][c] / absMax; // -1 to +1
+        let R: number, G: number, B: number;
+        if (v >= 0) {
+          // Positive gradient (loss wants decrease) → red
+          R = Math.floor(v * 220);
+          G = Math.floor(v * 40);
+          B = Math.floor(v * 30);
+        } else {
+          // Negative gradient (loss wants increase) → blue
+          const a = -v;
+          R = Math.floor(a * 30);
+          G = Math.floor(a * 60);
+          B = Math.floor(a * 220);
+        }
+        ctx.fillStyle = `rgb(${R},${G},${B})`;
+        ctx.fillRect(c * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+      }
+    }
+  }, [data, width, height]);
+
+  return (
+    <canvas ref={canvasRef} width={width} height={height}
+      style={{ border: '1px solid #21262d', borderRadius: 2, display: 'block', imageRendering: 'pixelated', marginTop: 1 }} />
   );
 }
 

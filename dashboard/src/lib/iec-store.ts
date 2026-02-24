@@ -49,6 +49,7 @@ const EMPTY_STATE: IecState = {
   undo_depth: 0,
   activation_names: [],
   resolutions: null,
+  ssim_weight: 1.0,
 };
 
 const INITIAL: IecStore = {
@@ -321,6 +322,15 @@ export async function fetchCheckpoints() {
   }
 }
 
+/** Set the SSIM loss weight. Rebuilds trainer on the backend. */
+export async function setSsimWeight(weight: number) {
+  const result = await postJSON<IecState>('/iec/ssim_weight', { weight });
+  if (result) {
+    const prev = $iec.get();
+    $iec.set({ ...prev, state: result });
+  }
+}
+
 /** Fetch feature maps from all layers. */
 export async function fetchFeatureMaps() {
   const result = await fetchJSON<IecFeatureMaps>('/iec/features');
@@ -338,8 +348,10 @@ export async function ensureIecSession() {
     $iec.set({ ...prev, state });
     await fetchReconstructions();
     await fetchCheckpoints();
+    await fetchFeatureMaps();
     return;
   }
   await setupIec();
   await fetchCheckpoints();
+  await fetchFeatureMaps();
 }

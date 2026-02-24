@@ -2046,6 +2046,16 @@ class TrainerAPI:
                     {"error": f"Feature maps failed: {e}"}, status_code=500
                 )
 
+        @app.post("/iec/ssim_weight")
+        async def iec_ssim_weight(request: Request):
+            """Set the SSIM loss weight. Body: { weight: float }."""
+            if self._iec is None:
+                return JSONResponse({"error": "No active IEC session"}, status_code=409)
+            body = await request.json()
+            weight = float(body.get("weight", 1.0))
+            self._iec.set_ssim_weight(weight)
+            return self._iec.get_state()
+
         @app.post("/iec/teardown")
         async def iec_teardown():
             """Tear down the IEC session."""
