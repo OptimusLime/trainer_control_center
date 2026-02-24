@@ -52,6 +52,7 @@ export default function IecPanel() {
   const [lr, setLr] = useState('0.01');
   const [cpTag, setCpTag] = useState('');
   const [selectedChannel, setSelectedChannel] = useState<ChannelSelection | null>(null);
+  const [normalizeActivations, setNormalizeActivations] = useState(true);
 
   useEffect(() => { ensureIecSession(); }, []);
 
@@ -164,8 +165,14 @@ export default function IecPanel() {
                     style={{ ...btn, fontSize: 9, padding: '1px 5px' }}>
                     Refresh
                   </button>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+                    <input type="checkbox" checked={normalizeActivations}
+                      onChange={e => setNormalizeActivations(e.target.checked)}
+                      style={{ margin: 0, width: 10, height: 10 }} />
+                    normalize
+                  </label>
                 </div>
-                <FeatureMapDisplay maps={featureMaps} selectedChannel={selectedChannel} />
+                <FeatureMapDisplay maps={featureMaps} selectedChannel={selectedChannel} normalizeActivations={normalizeActivations} />
               </>
             ) : (
               <div style={{ ...dimText, fontSize: 10 }}>Loading feature maps...</div>
@@ -486,9 +493,10 @@ function LossChart({ losses }: { losses: number[] }) {
  * Horizontal feature map strip — each layer is a column in a flex row.
  * Columns size to their content so nothing overlaps.
  */
-function FeatureMapDisplay({ maps, selectedChannel }: {
+function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations }: {
   maps: IecFeatureMaps;
   selectedChannel: ChannelSelection | null;
+  normalizeActivations: boolean;
 }) {
   // Build ordered slots: Input | E0..En | Latent | D0..Dn(Out)
   const slots: { layer: IecFeatureLayer | null; side: 'encoder' | 'decoder' | null; layerIdx: number; label: string }[] = [];
@@ -523,9 +531,10 @@ function FeatureMapDisplay({ maps, selectedChannel }: {
                 reconImage={maps.recon_image}
                 errorMap={maps.error_map}
                 highlightChannel={highlight}
+                normalizeActivations={normalizeActivations}
               />
             ) : slot.layer ? (
-              <FeatureColumnMaps layer={slot.layer} highlightChannel={highlight} />
+              <FeatureColumnMaps layer={slot.layer} highlightChannel={highlight} normalizeActivations={normalizeActivations} />
             ) : (
               <span style={{ fontSize: 9, color: '#30363d' }}>--</span>
             )}
@@ -593,11 +602,12 @@ function InputColumnMaps({ inputImage }: { inputImage: string }) {
 }
 
 /** Output column: reconstruction image + per-pixel error map. */
-function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel }: {
+function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel, normalizeActivations }: {
   layer: IecFeatureLayer | null;
   reconImage: string;
   errorMap: number[][];
   highlightChannel: number | null;
+  normalizeActivations: boolean;
 }) {
   const sz = 40;
   const cellSize = Math.max(1, Math.floor(sz / 28));
@@ -634,7 +644,7 @@ function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel }: {
 
 /** A single column of channel heatmaps stacked vertically.
  *  Each channel: activation heatmap + gradient heatmap + kernel weights. */
-function FeatureColumnMaps({ layer, highlightChannel }: { layer: IecFeatureLayer; highlightChannel: number | null }) {
+function FeatureColumnMaps({ layer, highlightChannel, normalizeActivations }: { layer: IecFeatureLayer; highlightChannel: number | null; normalizeActivations: boolean }) {
   const [H, W] = layer.resolution;
   const cellSize = Math.max(2, Math.min(5, Math.floor(40 / Math.max(H, W))));
   const dispW = W * cellSize;
@@ -650,13 +660,17 @@ function FeatureColumnMaps({ layer, highlightChannel }: { layer: IecFeatureLayer
           border: highlightChannel === ci ? '2px solid #f0883e' : '2px solid transparent',
           borderRadius: 3, padding: 1, marginBottom: 3,
         }}>
-          <MiniHeatmap data={ch.data} width={dispW} height={dispH} />
+          <MiniHeatmap data={ch.data} width={dispW} height={dispH} normalize={normalizeActivations} />
           {ch.grad && (
             <GradHeatmap data={ch.grad} width={dispW} height={dispH} />
           )}
-          {/* Kernels: horizontal row of KxK weight patches */}
+          {/* Kernels: vertical stack of KxK weight patches, grouped with boundary */}
           {ch.kernels && ch.kernels.length > 0 && (
-            <div style={{ display: 'flex', gap: 1, marginTop: 1 }}>
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1,
+              border: '1px solid #30363d', borderRadius: 2, padding: 1,
+              background: '#0d1117',
+            }}>
               {ch.kernels.map((k, ki) => (
                 <KernelHeatmap key={ki} data={k} cellSize={kSize} />
               ))}
@@ -669,8 +683,11 @@ function FeatureColumnMaps({ layer, highlightChannel }: { layer: IecFeatureLayer
   );
 }
 
-/** Canvas-based mini heatmap for a 2D array. Viridis-ish colormap. */
-function MiniHeatmap({ data, width, height }: { data: number[][]; width: number; height: number }) {
+/** Canvas-based mini heatmap for a 2D array.
+ *  normalize=true (default): per-channel min/max → viridis colormap. Loses sign/scale info.
+ *  normalize=false: diverging colormap centered at zero. Blue=negative, black=zero, orange=positive.
+ *    Scale is symmetric: -absMax to +absMax so zero is always black. */
+function MiniHeatmap({ data, width, height, normalize = true }: { data: number[][]; width: number; height: number; normalize?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -686,29 +703,60 @@ function MiniHeatmap({ data, width, height }: { data: number[][]; width: number;
     const cw = width / cols;
     const ch = height / rows;
 
-    // Find min/max for normalization
-    let mn = Infinity, mx = -Infinity;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const v = data[r][c];
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-      }
-    }
-    const rng = mx - mn || 1;
+    if (normalize) {
+      // Normalized: per-channel min/max → viridis
+      let mn = Infinity, mx = -Infinity;
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++) {
+          const v = data[r][c];
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+      const rng = mx - mn || 1;
 
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const t = (data[r][c] - mn) / rng; // 0-1
-        // Simple viridis: dark purple → cyan → yellow
-        const R = Math.floor(68 + t * 187);
-        const G = Math.floor(1 + t * 230);
-        const B = Math.floor(84 - t * 47);
-        ctx.fillStyle = `rgb(${Math.min(255, R)},${Math.min(255, G)},${Math.max(0, B)})`;
-        ctx.fillRect(c * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const t = (data[r][c] - mn) / rng; // 0-1
+          const R = Math.floor(68 + t * 187);
+          const G = Math.floor(1 + t * 230);
+          const B = Math.floor(84 - t * 47);
+          ctx.fillStyle = `rgb(${Math.min(255, R)},${Math.min(255, G)},${Math.max(0, B)})`;
+          ctx.fillRect(c * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+        }
+      }
+    } else {
+      // Absolute: diverging colormap centered at zero
+      // blue (negative) ← black (zero) → orange (positive)
+      let absMax = 0;
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++) {
+          const a = Math.abs(data[r][c]);
+          if (a > absMax) absMax = a;
+        }
+      if (absMax === 0) absMax = 1;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const v = data[r][c] / absMax; // -1 to +1
+          let R: number, G: number, B: number;
+          if (v >= 0) {
+            // Positive → orange/warm
+            R = Math.floor(v * 255);
+            G = Math.floor(v * 160);
+            B = Math.floor(v * 30);
+          } else {
+            // Negative → blue/cool
+            const a = -v;
+            R = Math.floor(a * 40);
+            G = Math.floor(a * 100);
+            B = Math.floor(a * 255);
+          }
+          ctx.fillStyle = `rgb(${R},${G},${B})`;
+          ctx.fillRect(c * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+        }
       }
     }
-  }, [data, width, height]);
+  }, [data, width, height, normalize]);
 
   return (
     <canvas ref={canvasRef} width={width} height={height}

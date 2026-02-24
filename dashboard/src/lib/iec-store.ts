@@ -49,7 +49,8 @@ const EMPTY_STATE: IecState = {
   undo_depth: 0,
   activation_names: [],
   resolutions: null,
-  ssim_weight: 1.0,
+  ssim_weight: 0.0,
+  loss_fn: 'mse',
 };
 
 const INITIAL: IecStore = {

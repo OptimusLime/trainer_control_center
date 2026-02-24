@@ -387,6 +387,21 @@ acc/
                           # ConvCPPNGenome, ChannelDescriptor, LayerGenome,
                           # ACTIVATION_REGISTRY, mutations, transfer_weights
   iec.py                  # IECSession manager
+  tasks/
+    base.py               # Task, EvalOnlyTask (existing)
+    reconstruction.py     # ReconstructionTask (existing, extended with loss_fn)
+    classification.py     # ClassificationTask (existing)
+    regression.py         # RegressionTask (existing)
+    kl_divergence.py      # KLDivergenceTask (existing)
+    effective_rank.py     # EffectiveRankTask (existing)
+    weight_diversity.py   # WeightDiversityTask (existing)
+    activation_sparsity.py # ActivationSparsityTask (existing)
+    lifetime_sparsity.py  # LifetimeSparsityTask (Phase 7 — NEW)
+    exclusivity.py        # WithinImageExclusivityTask (Phase 7 — NEW)
+    center_of_mass.py     # CenterOfMassTask (Phase 7 — NEW)
+    spatial_spread.py     # SpatialSpreadTask (Phase 7 — NEW)
+    kernel_orthogonality.py # KernelOrthogonalityTask (Phase 7 — NEW)
+    activation_overlap.py # ActivationOverlapDiagnostic (Phase 7 — NEW)
 
 dashboard/src/
   pages/
@@ -404,8 +419,10 @@ dashboard/src/
 
 | Existing | How IEC Uses It |
 |----------|----------------|
-| `Trainer` | IECSession creates a `Trainer(model, [recon_task], device, lr, batch_size=128)`. Calls `trainer.train(steps=n)` for SGD bursts. Trainer calls `model(batch[0])`, gets `dict[ModelOutput, Tensor]`, passes to task. |
-| `ReconstructionTask` | Primary training task. L1 loss between `model_output[RECONSTRUCTION]` and `batch[0]`. Checks `model.has_decoder` in `check_compatible()`. |
+| `Trainer` | IECSession creates a `Trainer(model, tasks, device, lr, batch_size=128)`. `tasks` is a list of all configured Task subclasses (structural + reconstruction). Trainer does weighted random task sampling per step — one task, one loss, one backward. Multi-task learning emerges across steps. |
+| `ReconstructionTask` | Reconstruction task. MSE/L1 + optional SSIM. Toggleable — disabled during structural-only training phases. |
+| `Task` base class | All 5 new structural pressures are standard Task subclasses. They implement `check_compatible`, `_build_head` (returns None), `compute_loss`, `evaluate`. Zero Trainer changes needed. |
+| `EvalOnlyTask` | Diagnostic tasks (ActivationOverlapDiagnostic) use the existing eval-only base class. `contributes_loss=False` so Trainer skips them during training. |
 | `CheckpointStore` | IEC checkpoints saved/loaded through existing store. Genome dict stored in checkpoint metadata. |
 | `load_mnist()` | Same MNIST 28x28 dataset. |
 | `TrainerAPI._is_model_busy()` | Extended with `self._iec is not None` check. Same 409 guard pattern. |
@@ -418,15 +435,129 @@ dashboard/src/
 1. `ConvCPPN` + `ConvCPPNLayer` + `HeterogeneousActivation` — new nn.Modules (~250 lines)
 2. `ConvCPPNGenome` + `ChannelDescriptor` + `LayerGenome` — new dataclasses (~80 lines)
 3. `ACTIVATION_REGISTRY` + mutation functions + `transfer_weights` — ~150 lines
-4. `IECSession` — new class (~250 lines)
-5. `/iec/*` API endpoints — ~200 lines added to trainer_api.py
-6. Frontend: iec page + panel + store + types — ~500 lines total
+4. `IECSession` — new class (~250 lines, extended with task management in Phase 7)
+5. `/iec/*` API endpoints — ~200 lines added to trainer_api.py (extended with `/iec/tasks` in Phase 7)
+6. Frontend: iec page + panel + store + types — ~500 lines total (extended with task panel in Phase 7)
+7. Structural pressure tasks — 5 new Task subclasses (~60-80 lines each, ~350 total)
+8. Diagnostic task — 1 new EvalOnlyTask subclass (~80 lines)
 
-**Estimated total new code: ~1430 lines.** No existing code modified except: (a) adding `self._iec` field and `/iec/*` endpoint section to `trainer_api.py`, (b) adding `self._iec is not None` to `_is_model_busy()`.
+**Estimated total new code: ~1860 lines.** No existing code modified except: (a) adding `self._iec` field and `/iec/*` endpoint section to `trainer_api.py`, (b) adding `self._iec is not None` to `_is_model_busy()`. **Zero changes to Trainer, Task base class, or any existing task.** The structural pressures are pure additions that plug into the existing multi-task system.
+
+### Phase 7: Structural Pressure Tasks (M-IEC-7)
+
+**NOTE:** This is the key theoretical contribution. Phases 1-6 give the human control over architecture and weights. Phase 7 gives the human control over *what the latent space means* — structural pressures that force UFR properties before reconstruction is even attempted. These implement the training protocol from the UFR brief (Kumar, Clune, Lehman, Stanley 2025): establish foundational regularities first, then build complex behavior on top.
+
+**Design principle:** Each pressure is a standard `Task` subclass. The existing Trainer already does weighted random task sampling per step, tasks are independently toggleable via `task.enabled`, and `task.weight` controls loss scaling. The IEC session manages the task list — `_build_trainer()` passes all enabled tasks to the Trainer. The UI gets a task panel with toggle switches, weight sliders, and per-task parameter controls.
+
+**Critical:** These tasks read `ModelOutput.SPATIAL` (encoder output pre-pool, `[B, C, H, W]`) and/or the pooled latent `[B, C, 3, 3]`. They do NOT need `RECONSTRUCTION`. This means they can run *without a decoder* — structural training can happen on the encoder alone, before the decoder even exists. The ConvCPPN forward already emits both `SPATIAL` and `LATENT`.
+
+**Training protocol the human follows:**
+1. Phase A — Structure: Enable structural tasks only (no reconstruction). Train until latent shows spatial correspondence and specificity.
+2. Phase B — Reconstruction: Enable reconstruction task on top of structural pressures. Optionally freeze encoder weights so decoder learns to work with the structured latent.
+3. Phase C — Evaluate: Run diagnostic tasks to measure UFR vs FER properties.
+
+The human controls which phase they're in by toggling tasks on/off in the dashboard.
+
+**Functionality:** I can toggle individual training pressures on/off from the dashboard. Each pressure has a weight slider and task-specific parameters (e.g. target_lifetime for sparsity). I can see per-task loss values in the training display. I can run structural-only training (no reconstruction), then bring reconstruction online later. The training protocol (structure → reconstruction) is a human choice, not hardcoded.
+
+**Foundation:** 5 new Task subclasses in `acc/tasks/`, all following the existing Task protocol. `IECSession._build_trainer()` extended to manage the full task list. `POST /iec/tasks` endpoint to toggle/configure tasks. Frontend task panel with toggles. **Critically: zero changes to Trainer.** The Trainer already supports multi-task weighted sampling.
+
+#### Structural Pressure Tasks (Category 1 — train first)
+
+**Task: `LifetimeSparsityTask`** (`acc/tasks/lifetime_sparsity.py`)
+- **What:** Across a batch, each latent spatial position should only activate significantly for a small fraction of images. Penalizes diffuse, always-on features.
+- **Why:** SGD produces features that are orthogonal in weight space but overlap in activation space — each feature fires mildly for 60%+ of images. This is the core FER signature. Lifetime sparsity forces genuine specialization.
+- **Reads:** `ModelOutput.SPATIAL` → pool to 3×3 → soft threshold → lifetime statistics.
+- **Loss:** `mean((lifetime - target_lifetime)^2)` where `lifetime = mean_over_batch(sigmoid(sharpness * z))`.
+- **Params:** `target_lifetime: float = 0.1`, `sharpness: float = 10.0`.
+- **No probe head.** Operates directly on spatial activations.
+
+**Task: `WithinImageExclusivityTask`** (`acc/tasks/exclusivity.py`)
+- **What:** For each individual image, the spatial activation pattern should be concentrated — a few positions highly active, the rest quiet. Minimizes entropy of per-image spatial activation distribution.
+- **Why:** Without this, every image lights up all 9 latent positions similarly. Exclusivity forces the network to commit: this "1" is described by *these* positions, this "0" by *those* positions.
+- **Reads:** `ModelOutput.SPATIAL` → pool to 3×3 → flatten spatial → softmax → entropy.
+- **Loss:** `mean(entropy(softmax(z_flat / temperature, dim=spatial)))`.
+- **Params:** `temperature: float = 0.5`.
+- **No probe head.**
+- **Relationship:** Works with LifetimeSparsity. Lifetime says "don't fire for everything." Exclusivity says "when you fire, be decisive about where."
+
+**Task: `CenterOfMassTask`** (`acc/tasks/center_of_mass.py`)
+- **What:** The center of mass of the latent spatial activation must match the center of mass of the input image pixels. Gives the 3×3 latent spatial meaning.
+- **Why:** Without this, the 3×3 latent has no reason to correspond to spatial location. With it, a digit in the top-left produces top-left latent activation. This is a "stepping stone" regularity.
+- **Reads:** `ModelOutput.SPATIAL` → pool to 3×3, AND `batch[0]` (input image).
+- **Loss:** `MSE(com_pred, com_gt)` for both x and y axes.
+- **Params:** None (beyond standard weight).
+- **No probe head.**
+
+**Task: `SpatialSpreadTask`** (`acc/tasks/spatial_spread.py`)
+- **What:** The second spatial moment (variance) of the latent activation should match the second moment of the input pixel distribution. Captures aspect ratio and spatial extent.
+- **Why:** Position (CenterOfMass) tells you *where*. Spread tells you *how the mass is distributed*. A "1" is tall/narrow, a "0" is round. This encodes shape without explicitly defining it.
+- **Reads:** `ModelOutput.SPATIAL` → pool to 3×3, AND `batch[0]` (input image).
+- **Loss:** `MSE(var_pred, var_gt)` for both x and y axes.
+- **Params:** None.
+- **No probe head.**
+- **Dependency:** Benefits from CenterOfMass (shares COM computation, but independent task).
+
+**Task: `KernelOrthogonalityTask`** (`acc/tasks/kernel_orthogonality.py`)
+- **What:** Decorrelates conv kernels across channels. Penalizes off-diagonal elements in the Gram matrix of normalized flattened kernels.
+- **Why:** When channels > 1, ensures different channels learn different features rather than redundant ones. SGD does this somewhat naturally, but structural pressures can degrade it.
+- **Reads:** Model parameters (encoder conv layer weights). Does NOT read model_output.
+- **Loss:** `||W_norm @ W_norm.T - I||^2` where `W_norm` is row-normalized flattened kernels.
+- **Params:** `layer_name: str` (which conv layer to target).
+- **No probe head.** Accesses weights directly.
+- **No-op when encoder has 1 channel.**
+
+#### Diagnostic Tasks (Category 3 — measure, don't train)
+
+These are `EvalOnlyTask` subclasses (existing base class) that measure UFR/FER properties without contributing gradient.
+
+**Task: `ActivationOverlapDiagnostic`** (`acc/tasks/activation_overlap.py`)
+- **What:** For each latent position, measures (a) lifetime (fraction of dataset that activates it), (b) pairwise cosine similarity of activation patterns across dataset, (c) co-activation fraction. Reports whether the latent exhibits UFR or FER signatures.
+- **UFR target:** Low cosine similarity AND low co-activation. **FER signature:** Low cosine similarity BUT high co-activation.
+- **Eval-only.** No gradient.
+
+Tasks:
+1. `acc/tasks/lifetime_sparsity.py` — `LifetimeSparsityTask(Task)`:
+   - `__init__(name, dataset, target_lifetime=0.1, sharpness=10.0, **kwargs)`
+   - `check_compatible`: model must emit SPATIAL
+   - `_build_head`: returns None
+   - `compute_loss`: pool SPATIAL to 3×3, soft threshold, compute lifetime, MSE vs target
+   - `evaluate`: return actual lifetime statistics
+2. `acc/tasks/exclusivity.py` — `WithinImageExclusivityTask(Task)`:
+   - `__init__(name, dataset, temperature=0.5, **kwargs)`
+   - `compute_loss`: pool SPATIAL to 3×3, flatten, softmax, entropy
+   - `evaluate`: return mean entropy
+3. `acc/tasks/center_of_mass.py` — `CenterOfMassTask(Task)`:
+   - `compute_loss`: COM of SPATIAL (pooled to 3×3) vs COM of input image
+   - `evaluate`: return mean COM error
+4. `acc/tasks/spatial_spread.py` — `SpatialSpreadTask(Task)`:
+   - `compute_loss`: second moment of SPATIAL vs second moment of input
+   - `evaluate`: return mean spread error
+5. `acc/tasks/kernel_orthogonality.py` — `KernelOrthogonalityTask(Task)`:
+   - `compute_loss`: Gram matrix penalty on encoder kernels
+   - `evaluate`: return off-diagonal Gram magnitude
+6. `acc/tasks/activation_overlap.py` — `ActivationOverlapDiagnostic(EvalOnlyTask)`:
+   - `evaluate`: lifetime, cosine sim, co-activation metrics
+7. `acc/iec.py` — extend `_build_trainer()`:
+   - Maintain a dict of task configs: `self.task_configs: dict[str, dict]`
+   - Default: only `recon` task enabled
+   - `set_task_config(task_name, enabled, weight, params)` method
+   - `_build_trainer()` builds all configured tasks, passes to Trainer
+8. `acc/trainer_api.py` — `POST /iec/tasks` endpoint:
+   - Body: `{ "task_name": str, "enabled": bool, "weight": float, "params": dict }`
+   - Returns updated task config list
+   - `GET /iec/tasks` returns current task configs with per-task last loss
+9. Frontend — task control panel in IecPanel.tsx:
+   - Collapsible "Training Tasks" section
+   - Per-task row: toggle switch, weight slider, task-specific param inputs
+   - Per-task loss badge (from step callback)
+   - Visual grouping: "Structural" vs "Reconstruction" vs "Diagnostic"
+
+**Verification:** Open `/iec`. Enable LifetimeSparsity (weight=1.0) and CenterOfMass (weight=1.0), disable Reconstruction. Train 200 steps — structural losses decrease. Feature maps show spatially concentrated activations (not diffuse blobs). Enable Reconstruction — loss decreases, reconstructions improve. Disable structural tasks — run 200 more steps — observe whether latent structure degrades. Compare checkpoints: structural-first vs reconstruction-only. The human can see the difference.
 
 ## Phase Execution Order
 
-Phase 1 → 2 → 3 → 4 → 5 → 6
+Phase 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 **Every phase is end-to-end.** Phase 1 delivers a working `/iec` page in the browser with the model, API, and UI wired together (stubs for training/mutation). Each subsequent phase fills in real functionality where stubs were, and each is verified in the browser.
 
@@ -436,7 +567,8 @@ Phase 1 → 2 → 3 → 4 → 5 → 6
 - After Phase 4: You can save/load checkpoints and inspect feature maps. Persistence and diagnosis.
 - After Phase 5: You can see the topology as a graph with feature maps, gradients, and kernels inline. Full diagnosis.
 - After Phase 6: You can freeze channels and manually edit kernels. The human controls both topology AND weights.
+- After Phase 7: You can apply structural pressures (sparsity, exclusivity, spatial correspondence) to the latent, train structure-first then reconstruction-second, and measure UFR vs FER properties. The human controls the training protocol.
 
 ## Full Outcome
 
-After all phases: The human opens `/iec`, sees a minimal 1-channel autoencoder. They train it for 100 steps, see blurry reconstructions. They add a sin channel and a cos channel, train more, see spatial frequency patterns emerge. They save checkpoints at each stage, fork to try different activation combinations, compare results. They grow the network to 8-12 channels across 2-3 layers, each hand-picked based on what they see in the feature maps and reconstructions. They can see exactly what each kernel detects, what SGD wants to change (gradient maps), and manually set kernels to known patterns (edge detectors, Gabor filters) then freeze them so SGD builds around their design. The internal representation is organized because the human organized it — each channel was added with intent, trained with purpose, kernels sculpted by hand, and kept because it earned its place.
+After all phases: The human opens `/iec`, sees a minimal autoencoder. They first enable structural pressures — lifetime sparsity, exclusivity, center of mass — and train the encoder to develop spatially meaningful, specialized features *before asking it to reconstruct anything*. They inspect the latent: each 3×3 position activates only for digits in that spatial region. Features are concentrated, not diffuse. Then they bring reconstruction online, with the encoder optionally frozen. The decoder learns to reconstruct from a structured latent. They grow the network — adding channels with purpose, each one observed to specialize for a different class or property. They freeze good channels, sculpt kernels for edge detection, and let SGD optimize around their design. The internal representation is organized because (a) structural pressures forced specialization, (b) the human selected architecture based on observed quality, and (c) foundational regularities were established before complex behavior was built on top — exactly the Picbreeder principle.
