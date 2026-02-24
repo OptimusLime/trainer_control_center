@@ -29,7 +29,7 @@ export async function postJSON<T>(path: string, body?: unknown): Promise<T | nul
       method: 'POST',
       headers: body ? { 'Content-Type': 'application/json' } : {},
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(60000),
     });
     if (!resp.ok) return null;
     return await resp.json() as T;

@@ -1,0 +1,43 @@
+---
+import Layout from '../layouts/Layout.astro';
+import IecPanel from '../components/IecPanel.tsx';
+---
+
+<Layout title="ACC — Interactive Evolutionary CPPN">
+  <div class="iec-page">
+    <nav class="iec-nav">
+      <a href="/" class="iec-nav-link">&larr; Dashboard</a>
+      <span class="iec-nav-title">Interactive Evolutionary CPPN</span>
+    </nav>
+    <IecPanel client:load />
+  </div>
+</Layout>
+
+<style>
+  .iec-page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  .iec-nav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border, #30363d);
+    margin-bottom: 16px;
+  }
+  .iec-nav-link {
+    color: var(--blue, #58a6ff);
+    text-decoration: none;
+    font-size: 14px;
+  }
+  .iec-nav-link:hover {
+    text-decoration: underline;
+  }
+  .iec-nav-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg, #e6edf3);
+  }
+</style>

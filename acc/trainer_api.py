@@ -74,6 +74,11 @@ class TrainerAPI:
         self._inspector_bcl: Optional[object] = None  # BCL instance for teardown
         self._inspector_condition: Optional[str] = None
 
+        # IEC session state (M-IEC-1)
+        self._iec: Optional[object] = (
+            None  # IECSession, typed as object to avoid import cycle
+        )
+
         self._register_routes()
 
     def _is_model_busy(self) -> bool:
@@ -91,6 +96,8 @@ class TrainerAPI:
         if rj is not None and rj.state == "running":
             return True
         if self._inspector is not None:
+            return True
+        if self._iec is not None:
             return True
         return False
 
@@ -1884,6 +1891,106 @@ class TrainerAPI:
             self._inspector_condition = None
             return {"status": "torn_down"}
 
+        # -- IEC (Interactive Evolutionary CPPN) endpoints (M-IEC-1) --
+
+        @app.post("/iec/setup")
+        async def iec_setup(request: Request):
+            """Create an IEC session with a ConvCPPN model."""
+            if self._is_model_busy():
+                return JSONResponse(
+                    {"error": "Model is busy. Teardown active session first."},
+                    status_code=409,
+                )
+            from acc.iec import IECSession
+            from acc.dataset import load_mnist
+
+            data = await request.json() if await request.body() else {}
+            genome_dict = data.get("genome", None)
+
+            # Load MNIST if not already loaded
+            if "mnist_28" not in self.datasets:
+                self.datasets["mnist_28"] = load_mnist(image_size=28)
+            mnist = self.datasets["mnist_28"]
+
+            session = IECSession()
+            state = session.setup(self.device, mnist, genome_dict)
+            self._iec = session
+
+            return {"status": "ready", "state": state}
+
+        @app.get("/iec/state")
+        async def iec_state():
+            """Get current IEC session state."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            return self._iec.get_state()
+
+        @app.get("/iec/reconstructions")
+        async def iec_reconstructions(normalize: bool = False):
+            """Get inference reconstructions from current model."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            return self._iec.get_reconstructions(normalize=normalize)
+
+        @app.post("/iec/step")
+        async def iec_step(request: Request):
+            """Train N steps. Returns losses + fresh reconstructions."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            data = await request.json() if await request.body() else {}
+            n = min(data.get("n", 10), 1000)
+            lr = data.get("lr", None)
+            normalize = data.get("normalize", False)
+            try:
+                result = self._iec.step(n, lr)
+                # Include fresh reconstructions so UI updates in one round-trip
+                result["reconstructions"] = self._iec.get_reconstructions(
+                    normalize=normalize
+                )
+                return result
+            except NotImplementedError as e:
+                return JSONResponse(
+                    {"error": "not_implemented", "message": str(e)},
+                    status_code=501,
+                )
+
+        @app.post("/iec/mutate")
+        async def iec_mutate(request: Request):
+            """Apply a genome mutation. Returns updated state + reconstructions."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            data = await request.json()
+            mutation_type = data.pop("type", None)
+            if not mutation_type:
+                return JSONResponse({"error": "Missing 'type'"}, status_code=400)
+            try:
+                state = self._iec.mutate(mutation_type, **data)
+                state["reconstructions"] = self._iec.get_reconstructions()
+                return state
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        @app.post("/iec/undo")
+        async def iec_undo():
+            """Undo last mutation. Returns updated state + reconstructions."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            try:
+                state = self._iec.undo()
+                state["reconstructions"] = self._iec.get_reconstructions()
+                return state
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        @app.post("/iec/teardown")
+        async def iec_teardown():
+            """Tear down the IEC session."""
+            if self._iec is None:
+                return {"status": "no_session"}
+            self._iec.teardown()
+            self._iec = None
+            return {"status": "torn_down"}
+
         @app.get("/health")
         async def health():
             recipe_job = self.recipe_runner.current()
@@ -1898,6 +2005,7 @@ class TrainerAPI:
                 and recipe_job.state == "running",
                 "device": str(self.device),
                 "inspector_active": self._inspector is not None,
+                "iec_active": self._iec is not None,
             }
 
     def _rebuild_trainer(self):
