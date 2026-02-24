@@ -255,7 +255,7 @@ function LayerStack({ title, subtitle, layers, side, activations, busy, isDecode
             side,
             position: isDecoder ? layers.length - 1 : -1,
             activation: isDecoder ? 'relu' : 'identity',
-            channels: 1,
+            channels: 2,
           })}
           style={{ ...btn, fontSize: 10, padding: '2px 8px', color: '#58a6ff', borderColor: '#1f6feb' }}
         >
@@ -279,7 +279,7 @@ function LayerRow({ layer, side, layerIdx, activations, busy, canRemoveChannels,
   resolution: IecLayerResolution | null;
   canRemoveLayer: boolean;
 }) {
-  const [addAct, setAddAct] = useState('sin');
+  const [addAct, setAddAct] = useState('relu');
 
   const resLabel = resolution
     ? `${resolution.input_res}x${resolution.input_res} -> ${resolution.output_res}x${resolution.output_res}`
