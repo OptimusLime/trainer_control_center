@@ -23,6 +23,7 @@ import {
   $iecNormalize,
   $iecCheckpoints,
   $iecFeatureMaps,
+  $iecTasks,
   ensureIecSession,
   stepIec,
   mutateIec,
@@ -33,9 +34,10 @@ import {
   loadCheckpoint,
   fetchFeatureMaps,
   setSsimWeight,
+  setTaskConfig,
 } from '../lib/iec-store';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer } from '../lib/iec-types';
+import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer, IecTaskConfig } from '../lib/iec-types';
 import IecArchGraph from './IecArchGraph';
 import type { ChannelSelection } from './IecArchGraph';
 
@@ -49,6 +51,7 @@ export default function IecPanel() {
   const normalize = useStore($iecNormalize);
   const checkpoints = useStore($iecCheckpoints);
   const featureMaps = useStore($iecFeatureMaps);
+  const tasks = useStore($iecTasks);
   const [lr, setLr] = useState('0.01');
   const [cpTag, setCpTag] = useState('');
   const [selectedChannel, setSelectedChannel] = useState<ChannelSelection | null>(null);
@@ -204,6 +207,9 @@ export default function IecPanel() {
           layerResolutions={resolutions?.decoder ?? null}
         />
       </div>
+
+      {/* Training Tasks */}
+      <TaskPanel tasks={tasks} busy={busy} />
 
       {/* Checkpoints */}
       <div style={{ ...card, marginBottom: 8 }}>
@@ -878,6 +884,159 @@ function Stat({ label, value }: { label: string; value: string | number }) {
     <span style={{ fontSize: 12, color: '#8b949e', fontFamily: 'monospace' }}>
       {label} <b style={{ color: '#e6edf3' }}>{value}</b>
     </span>
+  );
+}
+
+/* -- Training Task Panel -- */
+
+const CATEGORY_ORDER: Record<string, number> = { structural: 0, reconstruction: 1, diagnostic: 2 };
+const CATEGORY_COLORS: Record<string, string> = {
+  structural: '#58a6ff',
+  reconstruction: '#3fb950',
+  diagnostic: '#d29922',
+};
+
+function TaskPanel({ tasks, busy }: { tasks: IecTaskConfig[]; busy: boolean }) {
+  const [expanded, setExpanded] = useState(true);
+
+  if (!tasks || tasks.length === 0) return null;
+
+  // Group by category
+  const grouped: Record<string, IecTaskConfig[]> = {};
+  for (const t of tasks) {
+    (grouped[t.category] ??= []).push(t);
+  }
+  const categories = Object.keys(grouped).sort(
+    (a, b) => (CATEGORY_ORDER[a] ?? 9) - (CATEGORY_ORDER[b] ?? 9)
+  );
+
+  return (
+    <div style={{ ...card, marginBottom: 8 }}>
+      <div
+        style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span style={{ ...dimText, fontWeight: 600, fontSize: 12 }}>
+          Training Tasks
+        </span>
+        <span style={{ fontSize: 10, color: '#484f58' }}>
+          {tasks.filter(t => t.enabled).length}/{tasks.length} enabled
+        </span>
+        <span style={{ fontSize: 10, color: '#484f58' }}>{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 6 }}>
+          {categories.map(cat => (
+            <div key={cat} style={{ marginBottom: 6 }}>
+              <div style={{
+                fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em',
+                color: CATEGORY_COLORS[cat] ?? '#8b949e', marginBottom: 3,
+              }}>
+                {cat}
+              </div>
+              {grouped[cat].map(task => (
+                <TaskRow key={task.name} task={task} busy={busy} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaskRow({ task, busy }: { task: IecTaskConfig; busy: boolean }) {
+  const [showParams, setShowParams] = useState(false);
+  const paramKeys = Object.keys(task.params);
+  const hasParams = paramKeys.length > 0;
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0',
+      borderBottom: '1px solid #21262d',
+    }}>
+      {/* Toggle switch */}
+      <label style={{
+        position: 'relative', display: 'inline-block',
+        width: 28, height: 16, flexShrink: 0,
+      }}>
+        <input
+          type="checkbox"
+          checked={task.enabled}
+          disabled={busy}
+          onChange={() => setTaskConfig(task.name, { enabled: !task.enabled })}
+          style={{ opacity: 0, width: 0, height: 0 }}
+        />
+        <span style={{
+          position: 'absolute', cursor: busy ? 'default' : 'pointer',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: task.enabled ? '#238636' : '#30363d',
+          borderRadius: 8, transition: 'background 0.2s',
+        }}>
+          <span style={{
+            position: 'absolute',
+            height: 12, width: 12, left: task.enabled ? 14 : 2, top: 2,
+            background: '#e6edf3', borderRadius: '50%', transition: 'left 0.2s',
+          }} />
+        </span>
+      </label>
+
+      {/* Task name */}
+      <span style={{
+        fontSize: 11, color: task.enabled ? '#e6edf3' : '#484f58',
+        minWidth: 130, flexShrink: 0,
+      }}>
+        {task.display}
+      </span>
+
+      {/* Weight */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#8b949e' }}>
+        w
+        <input
+          type="number"
+          value={task.weight}
+          disabled={busy}
+          onChange={e => {
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v) && v >= 0) setTaskConfig(task.name, { weight: v });
+          }}
+          step="0.1" min="0" max="10"
+          style={{ ...inputStyle, width: 45, fontSize: 10, padding: '1px 3px' }}
+        />
+      </label>
+
+      {/* Params toggle */}
+      {hasParams && (
+        <button
+          onClick={() => setShowParams(!showParams)}
+          style={{ ...btn, fontSize: 9, padding: '1px 5px', color: '#8b949e', borderColor: '#30363d' }}
+        >
+          {showParams ? 'hide' : 'params'}
+        </button>
+      )}
+
+      {/* Inline params when expanded */}
+      {showParams && hasParams && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {paramKeys.map(key => (
+            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 10, color: '#8b949e' }}>
+              {key}
+              <input
+                type="number"
+                value={task.params[key] as number}
+                disabled={busy}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v)) setTaskConfig(task.name, { params: { [key]: v } });
+                }}
+                step="0.01" min="0"
+                style={{ ...inputStyle, width: 55, fontSize: 10, padding: '1px 3px' }}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -2056,6 +2056,43 @@ class TrainerAPI:
             self._iec.set_ssim_weight(weight)
             return self._iec.get_state()
 
+        @app.get("/iec/tasks")
+        async def iec_get_tasks():
+            """Return current task configurations."""
+            if self._iec is None:
+                return JSONResponse({"error": "No active IEC session"}, status_code=409)
+            return self._iec.get_task_configs()
+
+        @app.post("/iec/tasks")
+        async def iec_set_task(request: Request):
+            """Configure a single task.
+
+            Body: {
+                task_name: str,
+                enabled?: bool,
+                weight?: float,
+                params?: dict
+            }
+
+            Returns updated task configs list.
+            """
+            if self._iec is None:
+                return JSONResponse({"error": "No active IEC session"}, status_code=409)
+            body = await request.json()
+            task_name = body.get("task_name")
+            if not task_name:
+                return JSONResponse({"error": "task_name is required"}, status_code=400)
+            try:
+                configs = self._iec.set_task_config(
+                    task_name=task_name,
+                    enabled=body.get("enabled"),
+                    weight=body.get("weight"),
+                    params=body.get("params"),
+                )
+                return configs
+            except ValueError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
         @app.post("/iec/teardown")
         async def iec_teardown():
             """Tear down the IEC session."""

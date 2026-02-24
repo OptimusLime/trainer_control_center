@@ -443,9 +443,7 @@ dashboard/src/
 
 **Estimated total new code: ~1860 lines.** No existing code modified except: (a) adding `self._iec` field and `/iec/*` endpoint section to `trainer_api.py`, (b) adding `self._iec is not None` to `_is_model_busy()`. **Zero changes to Trainer, Task base class, or any existing task.** The structural pressures are pure additions that plug into the existing multi-task system.
 
-### Phase 7: Structural Pressure Tasks (M-IEC-7) --- IN PROGRESS
-
-**Progress:** All 6 task files written and importing. NOT yet tested, integrated into IECSession, wired to API, or surfaced in frontend. Next: test → integrate → wire → verify.
+### Phase 7: Structural Pressure Tasks (M-IEC-7) --- COMPLETED
 
 **NOTE:** This is the key theoretical contribution. Phases 1-6 give the human control over architecture and weights. Phase 7 gives the human control over *what the latent space means* — structural pressures that force UFR properties before reconstruction is even attempted. These implement the training protocol from the UFR brief (Kumar, Clune, Lehman, Stanley 2025): establish foundational regularities first, then build complex behavior on top.
 

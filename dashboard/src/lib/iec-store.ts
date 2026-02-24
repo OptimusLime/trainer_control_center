@@ -13,6 +13,7 @@ import type {
   IecStepResponse,
   IecCheckpoint,
   IecFeatureMaps,
+  IecTaskConfig,
 } from './iec-types';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,7 @@ const EMPTY_STATE: IecState = {
   resolutions: null,
   ssim_weight: 0.0,
   loss_fn: 'mse',
+  tasks: [],
 };
 
 const INITIAL: IecStore = {
@@ -80,6 +82,7 @@ export const $iecLossHistory = computed($iec, s => s.lossHistory);
 export const $iecNormalize = computed($iec, s => s.normalize);
 export const $iecCheckpoints = computed($iec, s => s.checkpoints);
 export const $iecFeatureMaps = computed($iec, s => s.featureMaps);
+export const $iecTasks = computed($iec, s => s.state.tasks ?? []);
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -329,6 +332,34 @@ export async function setSsimWeight(weight: number) {
   if (result) {
     const prev = $iec.get();
     $iec.set({ ...prev, state: result });
+  }
+}
+
+/** Configure a training task (enable/disable, weight, params). */
+export async function setTaskConfig(
+  taskName: string,
+  opts: { enabled?: boolean; weight?: number; params?: Record<string, unknown> }
+) {
+  const body: Record<string, unknown> = { task_name: taskName, ...opts };
+  const result = await postJSON<IecTaskConfig[]>('/iec/tasks', body);
+  if (result) {
+    const prev = $iec.get();
+    $iec.set({
+      ...prev,
+      state: { ...prev.state, tasks: result },
+    });
+  }
+}
+
+/** Fetch current task configurations. */
+export async function fetchTaskConfigs() {
+  const result = await fetchJSON<IecTaskConfig[]>('/iec/tasks');
+  if (result) {
+    const prev = $iec.get();
+    $iec.set({
+      ...prev,
+      state: { ...prev.state, tasks: result },
+    });
   }
 }
 

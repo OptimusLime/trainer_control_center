@@ -14,6 +14,16 @@ export interface IecResolutions {
   bottleneck_res: number;
 }
 
+export interface IecTaskConfig {
+  name: string;
+  display: string;
+  category: 'reconstruction' | 'structural' | 'diagnostic';
+  enabled: boolean;
+  weight: number;
+  params: Record<string, unknown>;
+  default_params: Record<string, unknown>;
+}
+
 export interface IecState {
   active: boolean;
   genome: IecGenome | null;
@@ -26,6 +36,7 @@ export interface IecState {
   resolutions: IecResolutions | null;
   ssim_weight: number;
   loss_fn: string;         // 'mse' or 'l1'
+  tasks?: IecTaskConfig[];
 }
 
 export interface IecGenome {

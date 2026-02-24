@@ -34,9 +34,84 @@ from acc.models.conv_cppn import (
 )
 from acc.model_output import ModelOutput
 from acc.trainer import Trainer
+from acc.tasks.base import Task
 from acc.tasks.reconstruction import ReconstructionTask
+from acc.tasks.lifetime_sparsity import LifetimeSparsityTask
+from acc.tasks.exclusivity import WithinImageExclusivityTask
+from acc.tasks.center_of_mass import CenterOfMassTask
+from acc.tasks.spatial_spread import SpatialSpreadTask
+from acc.tasks.kernel_orthogonality import KernelOrthogonalityTask
+from acc.tasks.activation_overlap import ActivationOverlapDiagnostic
 from acc.dataset import AccDataset
 from acc.checkpoints import CheckpointStore
+
+
+# Registry of all available IEC tasks.
+# Each entry: (display_name, category, builder_fn, default_params)
+# builder_fn(name, dataset, **params) -> Task
+_TASK_REGISTRY: dict[str, dict] = {
+    "recon": {
+        "display": "Reconstruction",
+        "category": "reconstruction",
+        "builder": lambda name, ds, **p: ReconstructionTask(
+            name,
+            ds,
+            loss_fn=p.get("loss_fn", "mse"),
+            ssim_weight=p.get("ssim_weight", 0.0),
+        ),
+        "default_params": {"loss_fn": "mse", "ssim_weight": 0.0},
+    },
+    "lifetime_sparsity": {
+        "display": "Lifetime Sparsity",
+        "category": "structural",
+        "builder": lambda name, ds, **p: LifetimeSparsityTask(
+            name,
+            ds,
+            target_lifetime=p.get("target_lifetime", 0.1),
+            sharpness=p.get("sharpness", 10.0),
+        ),
+        "default_params": {"target_lifetime": 0.1, "sharpness": 10.0},
+    },
+    "exclusivity": {
+        "display": "Within-Image Exclusivity",
+        "category": "structural",
+        "builder": lambda name, ds, **p: WithinImageExclusivityTask(
+            name,
+            ds,
+            temperature=p.get("temperature", 0.5),
+        ),
+        "default_params": {"temperature": 0.5},
+    },
+    "center_of_mass": {
+        "display": "Center of Mass",
+        "category": "structural",
+        "builder": lambda name, ds, **p: CenterOfMassTask(name, ds),
+        "default_params": {},
+    },
+    "spatial_spread": {
+        "display": "Spatial Spread",
+        "category": "structural",
+        "builder": lambda name, ds, **p: SpatialSpreadTask(name, ds),
+        "default_params": {},
+    },
+    "kernel_orthogonality": {
+        "display": "Kernel Orthogonality",
+        "category": "structural",
+        "builder": lambda name, ds, **p: KernelOrthogonalityTask(name, ds),
+        "default_params": {},
+    },
+    "activation_overlap": {
+        "display": "Activation Overlap (diagnostic)",
+        "category": "diagnostic",
+        "builder": lambda name, ds, **p: ActivationOverlapDiagnostic(
+            name,
+            ds,
+            threshold=p.get("threshold", 0.1),
+            n_eval_batches=p.get("n_eval_batches", 20),
+        ),
+        "default_params": {"threshold": 0.1, "n_eval_batches": 20},
+    },
+}
 
 
 def _tensor_to_base64(tensor: torch.Tensor) -> str:
@@ -79,6 +154,10 @@ class IECSession:
         self.ssim_weight: float = 0.0  # pixel_loss + ssim_weight * (1 - SSIM)
         self.loss_fn: str = "mse"  # 'mse' or 'l1'
 
+        # Multi-task config: {task_name: {enabled, weight, params}}
+        # Default: only reconstruction enabled.
+        self.task_configs: dict[str, dict] = IECSession._default_task_configs()
+
     def setup(
         self,
         device: torch.device,
@@ -110,15 +189,136 @@ class IECSession:
 
         return self.get_state()
 
+    @staticmethod
+    def _default_task_configs() -> dict[str, dict]:
+        """Default task configuration: only reconstruction enabled."""
+        configs: dict[str, dict] = {}
+        for name, reg in _TASK_REGISTRY.items():
+            configs[name] = {
+                "enabled": name == "recon",  # only recon on by default
+                "weight": 1.0,
+                "params": dict(reg["default_params"]),
+            }
+        return configs
+
+    def set_task_config(
+        self,
+        task_name: str,
+        enabled: Optional[bool] = None,
+        weight: Optional[float] = None,
+        params: Optional[dict] = None,
+    ) -> list[dict]:
+        """Update config for a single task and rebuild the trainer.
+
+        Returns the updated task configs dict.
+        """
+        if task_name not in _TASK_REGISTRY:
+            raise ValueError(
+                f"Unknown task '{task_name}'. Available: {list(_TASK_REGISTRY.keys())}"
+            )
+        cfg = self.task_configs.get(task_name)
+        if cfg is None:
+            reg = _TASK_REGISTRY[task_name]
+            cfg = {
+                "enabled": False,
+                "weight": 1.0,
+                "params": dict(reg["default_params"]),
+            }
+            self.task_configs[task_name] = cfg
+
+        if enabled is not None:
+            cfg["enabled"] = enabled
+        if weight is not None:
+            cfg["weight"] = weight
+        if params is not None:
+            cfg["params"].update(params)
+
+        # Sync recon params from session-level ssim_weight / loss_fn
+        if task_name == "recon":
+            if "ssim_weight" in cfg["params"]:
+                self.ssim_weight = cfg["params"]["ssim_weight"]
+            if "loss_fn" in cfg["params"]:
+                self.loss_fn = cfg["params"]["loss_fn"]
+
+        if self.model is not None:
+            self._build_trainer()
+
+        return self.get_task_configs()
+
+    def get_task_configs(self) -> list[dict]:
+        """Return current task configs for the API.
+
+        Each entry: {name, display, category, enabled, weight, params, default_params}
+        """
+        result = []
+        for name, reg in _TASK_REGISTRY.items():
+            cfg = self.task_configs.get(
+                name,
+                {
+                    "enabled": False,
+                    "weight": 1.0,
+                    "params": dict(reg["default_params"]),
+                },
+            )
+            result.append(
+                {
+                    "name": name,
+                    "display": reg["display"],
+                    "category": reg["category"],
+                    "enabled": cfg["enabled"],
+                    "weight": cfg["weight"],
+                    "params": cfg["params"],
+                    "default_params": reg["default_params"],
+                }
+            )
+        return result
+
     def _build_trainer(self):
-        """(Re)build the trainer with current model and dataset."""
-        task = ReconstructionTask(
-            "recon", self.dataset, ssim_weight=self.ssim_weight, loss_fn=self.loss_fn
-        )
-        task.attach(self.model)
+        """(Re)build the trainer with current model, dataset, and task configs.
+
+        Builds all tasks from task_configs. Enabled tasks get task.enabled=True
+        and their weight set. Disabled tasks are not included (Trainer only
+        sees enabled tasks). Eval-only tasks are always included so they
+        run during evaluate_all().
+        """
+        tasks: list[Task] = []
+
+        for name, reg in _TASK_REGISTRY.items():
+            cfg = self.task_configs.get(
+                name,
+                {
+                    "enabled": False,
+                    "weight": 1.0,
+                    "params": dict(reg["default_params"]),
+                },
+            )
+
+            # For recon task, inject session-level ssim_weight and loss_fn
+            build_params = dict(cfg["params"])
+            if name == "recon":
+                build_params["ssim_weight"] = self.ssim_weight
+                build_params["loss_fn"] = self.loss_fn
+
+            try:
+                task = reg["builder"](name, self.dataset, **build_params)
+            except Exception as e:
+                print(f"[IEC] Warning: failed to build task '{name}': {e}")
+                continue
+
+            task.enabled = cfg["enabled"]
+            task.weight = cfg["weight"]
+
+            try:
+                task.attach(self.model)
+            except Exception as e:
+                print(f"[IEC] Warning: task '{name}' incompatible: {e}")
+                continue
+
+            tasks.append(task)
+
         self.trainer = Trainer(
             self.model,
-            [task],
+            tasks,
             self.device,
             lr=self._lr,
             batch_size=128,
@@ -127,6 +327,9 @@ class IECSession:
     def set_ssim_weight(self, weight: float):
         """Update SSIM loss weight and rebuild trainer."""
         self.ssim_weight = weight
+        # Keep recon task config in sync
+        if "recon" in self.task_configs:
+            self.task_configs["recon"]["params"]["ssim_weight"] = weight
         if self.model is not None:
             self._build_trainer()
 
@@ -144,6 +347,7 @@ class IECSession:
             "resolutions": self.model.resolution_info() if self.model else None,
             "ssim_weight": self.ssim_weight,
             "loss_fn": self.loss_fn,
+            "tasks": self.get_task_configs(),
         }
 
     def get_reconstructions(self, n: int = 8, normalize: bool = False) -> dict:
@@ -658,3 +862,4 @@ class IECSession:
         self.step_count = 0
         self.last_loss = None
         self.undo_stack = []
+        self.task_configs = IECSession._default_task_configs()
