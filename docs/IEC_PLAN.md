@@ -343,7 +343,7 @@ Tasks:
 
 **Verification:** Graph renders the 4→1 encoder topology correctly. After adding 3 channels with different activations, graph shows 4 input → 3 hidden with connection lines. Clicking a channel highlights it and shows its feature map in the strip below. Gradient maps show red/blue heatmaps. Kernel visualization shows per-input KxK grids. Output column shows reconstruction + error map. SSIM weight slider adjusts the loss formula.
 
-### Phase 6: Kernel Editing + Selective Freezing (M-IEC-6)
+### Phase 6: Kernel Editing + Selective Freezing (M-IEC-6) --- IN PROGRESS
 
 **NOTE:** This phase gives the human direct control over individual conv kernels — the lowest-level weights in the network. Combined with the architecture graph and feature maps, this makes the human a true weight-level optimizer: they can see what each kernel detects, decide to keep it, freeze it, or manually set it to a known pattern (edge detector, Gabor filter, identity, etc.).
 
