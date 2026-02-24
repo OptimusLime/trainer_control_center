@@ -647,10 +647,8 @@ def add_channel(
     new_row = [1] * n_in if connect_all else [0] * n_in
     layer.connection_mask.append(new_row)
 
-    # If this is the LAST encoder layer, adding a channel increases the bottleneck.
-    # The FIRST decoder layer's input channels must grow to match (bottleneck + 3 coords).
-    if side == "encoder" and layer_idx == len(genome.encoder_layers) - 1:
-        _grow_decoder_input(genome)
+    # Propagate: this layer's output changed, so the next layer's input must match.
+    _propagate_output_change(genome, side, layer_idx)
 
     return genome
 
@@ -701,10 +699,8 @@ def remove_channel(
     layer.channel_descriptors.pop(channel_idx)
     layer.connection_mask.pop(channel_idx)
 
-    # If this is the last encoder layer, removing a channel shrinks the bottleneck.
-    # The first decoder layer's input channels must shrink to match.
-    if side == "encoder" and layer_idx == len(genome.encoder_layers) - 1:
-        _shrink_decoder_input(genome, channel_idx)
+    # Propagate: this layer's output changed, so the next layer's input must match.
+    _propagate_output_change(genome, side, layer_idx)
 
     return genome
 
@@ -1033,6 +1029,30 @@ def _sync_decoder_input_to_bottleneck(genome: ConvCPPNGenome) -> None:
         return
     expected_in = genome.bottleneck_channels + 3
     _resize_mask_columns(genome.decoder_layers[0], expected_in)
+
+
+def _propagate_output_change(genome: ConvCPPNGenome, side: str, layer_idx: int) -> None:
+    """After a layer's output channel count changes, update the next layer's input.
+
+    Handles all cases:
+    - Encoder layer N changed → encoder layer N+1's mask must match N's output.
+    - Last encoder layer changed → first decoder layer's mask = bottleneck + 3 coords.
+    - Decoder layer N changed → decoder layer N+1's mask = N's output + 3 coords.
+    """
+    layers = genome.encoder_layers if side == "encoder" else genome.decoder_layers
+    new_out = layers[layer_idx].out_channels
+
+    if side == "encoder":
+        if layer_idx < len(layers) - 1:
+            # Next encoder layer: input = this layer's output (no coords)
+            _resize_mask_columns(layers[layer_idx + 1], new_out)
+        # Last encoder layer always affects first decoder layer
+        if layer_idx == len(layers) - 1:
+            _sync_decoder_input_to_bottleneck(genome)
+    else:
+        # Decoder: next decoder layer input = this layer's output + 3 coords
+        if layer_idx < len(layers) - 1:
+            _resize_mask_columns(layers[layer_idx + 1], new_out + 3)
 
 
 def _grow_decoder_input(genome: ConvCPPNGenome) -> None:

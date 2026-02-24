@@ -21,15 +21,20 @@ import {
   $iecToast,
   $iecLossHistory,
   $iecNormalize,
+  $iecCheckpoints,
+  $iecFeatureMaps,
   ensureIecSession,
   stepIec,
   mutateIec,
   undoIec,
   resetIec,
   toggleNormalize,
+  saveCheckpoint,
+  loadCheckpoint,
+  fetchFeatureMaps,
 } from '../lib/iec-store';
-import { useEffect, useState } from 'react';
-import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution } from '../lib/iec-types';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer } from '../lib/iec-types';
 
 export default function IecPanel() {
   const state = useStore($iecState);
@@ -39,7 +44,11 @@ export default function IecPanel() {
   const toast = useStore($iecToast);
   const lossHistory = useStore($iecLossHistory);
   const normalize = useStore($iecNormalize);
+  const checkpoints = useStore($iecCheckpoints);
+  const featureMaps = useStore($iecFeatureMaps);
   const [lr, setLr] = useState('0.01');
+  const [cpTag, setCpTag] = useState('');
+  const [showFeatures, setShowFeatures] = useState(false);
 
   useEffect(() => { ensureIecSession(); }, []);
 
@@ -53,7 +62,7 @@ export default function IecPanel() {
   const resolutions = state.resolutions;
 
   return (
-    <div style={{ padding: '12px 0' }}>
+    <div style={{ padding: '12px 0', position: 'relative' }}>
       {toast && <Toast message={toast} />}
 
       {/* Top bar: stats + train + reset */}
@@ -138,6 +147,52 @@ export default function IecPanel() {
           isDecoder={true}
           layerResolutions={resolutions?.decoder ?? null}
         />
+      </div>
+
+      {/* Checkpoints */}
+      <div style={{ ...card, marginBottom: 8 }}>
+        <div style={{ ...dimText, fontWeight: 600, marginBottom: 6 }}>Checkpoints</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <input type="text" placeholder="tag" value={cpTag} onChange={e => setCpTag(e.target.value)}
+            style={{ ...inputStyle, width: 120 }} />
+          <button disabled={busy || !cpTag.trim()}
+            onClick={() => { saveCheckpoint(cpTag.trim()); setCpTag(''); }}
+            style={cpTag.trim() ? { ...btn, borderColor: '#238636', color: '#3fb950' } : { ...btn, opacity: 0.4 }}>
+            Save
+          </button>
+          <div style={{ borderLeft: '1px solid #30363d', height: 20, margin: '0 2px' }} />
+          {checkpoints.length > 0 ? checkpoints.map(cp => (
+            <button key={cp.id} disabled={busy}
+              onClick={() => loadCheckpoint(cp.id)}
+              style={{ ...btn, fontSize: 10 }}
+              title={`Load: ${cp.tag} (step ${cp.metrics?.iec_step ?? '?'})`}>
+              {cp.tag}
+            </button>
+          )) : (
+            <span style={{ ...dimText, fontSize: 10 }}>No checkpoints saved</span>
+          )}
+        </div>
+      </div>
+
+      {/* Feature Maps */}
+      <div style={{ ...card, marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <span style={{ ...dimText, fontWeight: 600 }}>Feature Maps</span>
+          <button disabled={busy}
+            onClick={() => { fetchFeatureMaps(); setShowFeatures(true); }}
+            style={btn}>
+            {featureMaps ? 'Refresh' : 'Fetch'}
+          </button>
+          {featureMaps && (
+            <button onClick={() => setShowFeatures(!showFeatures)}
+              style={{ ...btn, fontSize: 10 }}>
+              {showFeatures ? 'Hide' : 'Show'}
+            </button>
+          )}
+        </div>
+        {showFeatures && featureMaps && (
+          <FeatureMapDisplay maps={featureMaps} />
+        )}
       </div>
 
       {/* Genome JSON collapse */}
@@ -395,6 +450,112 @@ function LossChart({ losses }: { losses: number[] }) {
   );
 }
 
+/* -- Feature Map Display -- */
+
+function FeatureMapDisplay({ maps }: { maps: IecFeatureMaps }) {
+  return (
+    <div>
+      {/* Input image */}
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ ...dimText, fontSize: 10 }}>Input:</span>
+        <img src={`data:image/png;base64,${maps.input_image}`} width={56} height={56}
+          style={{ imageRendering: 'pixelated', border: '1px solid #30363d', background: '#000', display: 'block', marginTop: 2 }} />
+      </div>
+
+      {/* Encoder layers */}
+      {maps.encoder.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ ...dimText, fontSize: 10, fontWeight: 600, marginBottom: 4 }}>Encoder</div>
+          {maps.encoder.map(layer => (
+            <FeatureLayerRow key={layer.name} layer={layer} />
+          ))}
+        </div>
+      )}
+
+      {/* Decoder layers */}
+      {maps.decoder.length > 0 && (
+        <div>
+          <div style={{ ...dimText, fontSize: 10, fontWeight: 600, marginBottom: 4 }}>Decoder</div>
+          {maps.decoder.map(layer => (
+            <FeatureLayerRow key={layer.name} layer={layer} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeatureLayerRow({ layer }: { layer: IecFeatureLayer }) {
+  const [H, W] = layer.resolution;
+  // Scale display size — small features get bigger cells
+  const cellSize = Math.max(2, Math.min(8, Math.floor(112 / Math.max(H, W))));
+  const dispW = W * cellSize;
+  const dispH = H * cellSize;
+
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ fontSize: 10, color: '#484f58', marginBottom: 2 }}>
+        {layer.name} ({H}x{W}) — {layer.channels.length}ch
+      </div>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+        {layer.channels.map((ch, ci) => (
+          <div key={ci} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <MiniHeatmap data={ch.data} width={dispW} height={dispH} />
+            <span style={{ fontSize: 9, color: '#8b949e', marginTop: 1 }}>{ch.activation}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Canvas-based mini heatmap for a 2D array. Viridis-ish colormap. */
+function MiniHeatmap({ data, width, height }: { data: number[][]; width: number; height: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || data.length === 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const rows = data.length;
+    const cols = data[0].length;
+    canvas.width = width;
+    canvas.height = height;
+    const cw = width / cols;
+    const ch = height / rows;
+
+    // Find min/max for normalization
+    let mn = Infinity, mx = -Infinity;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const v = data[r][c];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+    }
+    const rng = mx - mn || 1;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const t = (data[r][c] - mn) / rng; // 0-1
+        // Simple viridis: dark purple → cyan → yellow
+        const R = Math.floor(68 + t * 187);
+        const G = Math.floor(1 + t * 230);
+        const B = Math.floor(84 - t * 47);
+        ctx.fillStyle = `rgb(${Math.min(255, R)},${Math.min(255, G)},${Math.max(0, B)})`;
+        ctx.fillRect(c * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+      }
+    }
+  }, [data, width, height]);
+
+  return (
+    <canvas ref={canvasRef} width={width} height={height}
+      style={{ border: '1px solid #21262d', borderRadius: 2, display: 'block', imageRendering: 'pixelated' }} />
+  );
+}
+
 /* -- Helpers -- */
 
 function Stat({ label, value }: { label: string; value: string | number }) {
@@ -407,8 +568,12 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 
 function Toast({ message }: { message: string }) {
   return (
-    <div style={{ background: '#30363d', border: '1px solid #f0883e', borderRadius: 4,
-      padding: '6px 12px', marginBottom: 8, color: '#f0883e', fontSize: 12 }}>
+    <div style={{
+      position: 'fixed', top: 12, right: 12, zIndex: 1000,
+      background: '#30363d', border: '1px solid #f0883e', borderRadius: 4,
+      padding: '8px 14px', color: '#f0883e', fontSize: 12,
+      boxShadow: '0 4px 12px rgba(0,0,0,0.5)', maxWidth: 400,
+    }}>
       {message}
     </div>
   );

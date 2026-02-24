@@ -66,7 +66,9 @@ def _snapshot_tasks(tasks: list) -> list[dict]:
             "type": type(t).__name__,
         }
         if hasattr(t, "dataset") and t.dataset is not None:
-            info["dataset"] = t.dataset.name if hasattr(t.dataset, "name") else str(t.dataset)
+            info["dataset"] = (
+                t.dataset.name if hasattr(t.dataset, "name") else str(t.dataset)
+            )
         if hasattr(t, "weight"):
             info["weight"] = t.weight
         if hasattr(t, "latent_slice") and t.latent_slice is not None:
@@ -233,6 +235,100 @@ class CheckpointStore:
         self._checkpoints[fork_id] = fork_cp
         self._current_id = fork_id
         return fork_cp
+
+    def load_metadata(self, checkpoint_id: str) -> Checkpoint:
+        """Load only the checkpoint metadata from disk, without touching model/trainer.
+
+        Useful when the caller needs to inspect the checkpoint's model_config
+        (e.g. to rebuild a model with a different architecture) before loading weights.
+
+        Args:
+            checkpoint_id: The checkpoint ID to read.
+
+        Returns:
+            The Checkpoint metadata.
+
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist.
+        """
+        # Return from cache if available
+        if checkpoint_id in self._checkpoints:
+            return self._checkpoints[checkpoint_id]
+
+        path = os.path.join(self.directory, f"{checkpoint_id}.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint file not found: {path}")
+
+        state = torch.load(path, weights_only=False, map_location="cpu")
+        meta = state["checkpoint_meta"]
+        cp = Checkpoint(
+            id=meta["id"],
+            tag=meta.get("tag", "unknown"),
+            parent_id=meta.get("parent_id"),
+            step=meta.get("step", 0),
+            timestamp=datetime.fromisoformat(meta["timestamp"])
+            if "timestamp" in meta
+            else datetime.now(),
+            recipe_name=meta.get("recipe_name"),
+            description=meta.get("description"),
+            model_config=meta.get("model_config", {}),
+            tasks_snapshot=meta.get("tasks_snapshot", []),
+            metrics=meta.get("metrics", {}),
+        )
+        self._checkpoints[checkpoint_id] = cp
+        return cp
+
+    def load_model_only(
+        self,
+        checkpoint_id: str,
+        autoencoder: nn.Module,
+        device: Optional[torch.device] = None,
+    ) -> Checkpoint:
+        """Load only the model weights from a checkpoint, skipping optimizer and probes.
+
+        Use this when the model architecture was rebuilt externally (e.g. from a
+        stored genome) and only the weights need restoring. The optimizer starts
+        fresh — appropriate for interactive evolution where architecture changes
+        between checkpoints.
+
+        Args:
+            checkpoint_id: The checkpoint ID to load.
+            autoencoder: The model to restore weights into (must match the
+                         architecture stored in the checkpoint).
+            device: Target device. If None, uses CPU.
+
+        Returns:
+            The Checkpoint metadata.
+
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist.
+        """
+        path = os.path.join(self.directory, f"{checkpoint_id}.pt")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint file not found: {path}")
+
+        target_device = device or torch.device("cpu")
+        state = torch.load(path, weights_only=False, map_location=target_device)
+
+        # Extract just the model weights from the trainer state
+        trainer_state = state["trainer_state"]
+        autoencoder.load_state_dict(trainer_state["autoencoder"])
+        autoencoder.to(target_device)
+
+        self._current_id = checkpoint_id
+        meta = state["checkpoint_meta"]
+        cp = self._checkpoints.get(
+            checkpoint_id,
+            Checkpoint(
+                id=checkpoint_id,
+                tag=meta.get("tag", "unknown"),
+                parent_id=meta.get("parent_id"),
+                step=meta.get("step", 0),
+                model_config=meta.get("model_config", {}),
+                metrics=meta.get("metrics", {}),
+            ),
+        )
+        return cp
 
     def tree(self) -> list[Checkpoint]:
         """Return flat list of all checkpoints with parent_id links."""

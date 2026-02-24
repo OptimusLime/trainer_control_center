@@ -289,28 +289,33 @@ Tasks:
 
 **Verification:** Open `/iec`. Step x50 at lr=0.01 — loss around 0.20. Click "Add Channel" (encoder, layer 0, sin). Architecture updates to show 2 channels. Latent dim now 18. Step x50 more — loss decreases further. Click Undo — architecture reverts. Add an encoder layer — resolution labels update. Remove it — works. Add a decoder layer — decoder now has 4 layers. The human is driving both channel-level and layer-level architecture search.
 
-### Phase 4: Checkpoints + Feature Maps (M-IEC-4)
+### Phase 4: Checkpoints + Feature Maps (M-IEC-4) --- COMPLETED
 
-**Functionality:** I can save named checkpoints, load them later, see per-channel feature map heatmaps for the current model, and compare architectures across saved checkpoints.
+**Functionality:** I can save named checkpoints, load them later (even when architecture has changed), and see per-channel feature map heatmaps for every layer via canvas-rendered mini heatmaps.
 
-**Foundation:** `IECSession.save_checkpoint()` / `load_checkpoint()` via existing `CheckpointStore`. `get_feature_maps()` with forward hooks on `ConvCPPNLayer`. `POST /iec/checkpoint/save`, `POST /iec/checkpoint/load`, `GET /iec/checkpoints`, `GET /iec/features` endpoints. Checkpoint list + feature map display in UI.
+**Foundation:** `CheckpointStore` extended with `load_metadata()` (reads genome without touching model) and `load_model_only()` (restores just model weights, fresh optimizer). `IECSession.save_checkpoint()` saves genome in `model_config` via `model.config()`, step count + loss in `metrics`. `IECSession.load_checkpoint()` rebuilds model from stored genome, then loads weights. `IECSession.get_feature_maps()` uses temporary forward hooks on all ConvCPPNLayers to capture per-channel activations as 2D arrays. Checkpoints filtered by `recipe_name="iec"`.
 
 Tasks:
-1. `acc/iec.py` — implement checkpoint and feature map methods:
-   - `save_checkpoint(tag, checkpoint_store)` — genome dict in metadata, model state_dict, step count
-   - `load_checkpoint(checkpoint_id, checkpoint_store)` — rebuild model from stored genome, load weights
-   - `list_checkpoints(checkpoint_store)` — filtered to IEC checkpoints
-   - `get_feature_maps(image_idx=0)` — forward hooks on ConvCPPNLayers, capture per-channel activations, return as base64 heatmaps
-2. API endpoints:
+1. `acc/checkpoints.py` — extended with:
+   - `load_metadata(checkpoint_id)` — reads .pt, returns Checkpoint with model_config (genome), without loading into model/trainer
+   - `load_model_only(checkpoint_id, autoencoder, device)` — loads just model weights, skips optimizer/probes
+2. `acc/iec.py` — checkpoint and feature map methods:
+   - `save_checkpoint(tag, checkpoint_store)` — uses CheckpointStore.save(), genome stored in model_config, metrics has iec_step + iec_last_loss
+   - `load_checkpoint(checkpoint_id, checkpoint_store)` — load_metadata() for genome, rebuild model, rebuild trainer, load_model_only() for weights
+   - `list_checkpoints(checkpoint_store)` — filtered to recipe_name="iec"
+   - `get_feature_maps(n=1)` — forward hooks on encoder_layers + decoder_layers, returns per-channel 2D arrays + input image
+3. API endpoints:
    - `POST /iec/checkpoint/save` — body: `{"tag": str}`
    - `POST /iec/checkpoint/load` — body: `{"id": str}`, returns full state + reconstructions
-   - `GET /iec/checkpoints` — returns checkpoint list
-   - `GET /iec/features?image_idx=0` — returns feature map heatmaps per layer per channel
-3. Frontend:
-   - Checkpoint controls: Save button (tag input), checkpoint list dropdown, Load button
-   - Feature map panel: per-layer heatmap grid showing each channel's activation for a selected input image (reuse `InspectHeatmap` component)
+   - `GET /iec/checkpoints` — returns filtered checkpoint list
+   - `GET /iec/features` — returns per-layer per-channel activation arrays + input image
+4. Frontend:
+   - `IecCheckpoint`, `IecFeatureMaps`, `IecFeatureLayer`, `IecFeatureChannel` types
+   - `saveCheckpoint()`, `loadCheckpoint()`, `fetchCheckpoints()`, `fetchFeatureMaps()` store actions
+   - Checkpoint controls: tag input + Save button, checkpoint buttons for quick load
+   - Feature map panel: Fetch/Refresh button, per-layer rows with canvas-rendered mini heatmaps (viridis colormap, auto-normalized)
 
-**Verification:** Train a 1-channel model for 100 steps. Save as "1ch-baseline". Add sin + cos channels, train 100 more. Save as "3ch-mixed". Load "1ch-baseline" — architecture reverts, reconstructions match saved state. Load "3ch-mixed" — back to 3 channels. Feature maps panel shows 1 heatmap for 1-channel model, 3 heatmaps for 3-channel model. Each heatmap is visually distinct (sin channel shows periodic patterns, cos channel shows different patterns, tanh shows something else).
+**Verification:** Train 50 steps, save as "test-50". Add cos channel, train 50 more, save as "2ch-cos-100". Load "test-50" — architecture reverts to 1 channel, latent=9, step=50. Load "2ch-cos-100" — back to 2 channels. Feature maps show 1 heatmap per encoder channel (14x14) and 1 per decoder channel (7x7, 14x14, 28x28). Verified via API + browser.
 
 ### Phase 5: Architecture Graph + Comparison (M-IEC-5)
 

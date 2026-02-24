@@ -1967,8 +1967,13 @@ class TrainerAPI:
                 state = self._iec.mutate(mutation_type, **data)
                 state["reconstructions"] = self._iec.get_reconstructions()
                 return state
-            except ValueError as e:
+            except (ValueError, RuntimeError) as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse(
+                    {"error": f"Mutation failed: {type(e).__name__}: {e}"},
+                    status_code=500,
+                )
 
         @app.post("/iec/undo")
         async def iec_undo():
@@ -1981,6 +1986,65 @@ class TrainerAPI:
                 return state
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
+
+        @app.post("/iec/checkpoint/save")
+        async def iec_checkpoint_save(request: Request):
+            """Save IEC checkpoint. Body: {"tag": str}."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            data = await request.json() if await request.body() else {}
+            tag = data.get("tag", "iec")
+            if not tag:
+                return JSONResponse({"error": "Missing 'tag'"}, status_code=400)
+            # Ensure checkpoint store exists
+            if self.checkpoints is None:
+                self.checkpoints = CheckpointStore("./acc/checkpoints_data")
+            try:
+                cp_dict = self._iec.save_checkpoint(tag, self.checkpoints)
+                return {"status": "saved", "checkpoint": cp_dict}
+            except Exception as e:
+                return JSONResponse({"error": f"Save failed: {e}"}, status_code=500)
+
+        @app.post("/iec/checkpoint/load")
+        async def iec_checkpoint_load(request: Request):
+            """Load IEC checkpoint. Body: {"id": str}."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            data = await request.json()
+            cp_id = data.get("id")
+            if not cp_id:
+                return JSONResponse({"error": "Missing 'id'"}, status_code=400)
+            if self.checkpoints is None:
+                return JSONResponse({"error": "No checkpoint store"}, status_code=400)
+            try:
+                state = self._iec.load_checkpoint(cp_id, self.checkpoints)
+                state["reconstructions"] = self._iec.get_reconstructions()
+                return state
+            except (ValueError, FileNotFoundError) as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": f"Load failed: {e}"}, status_code=500)
+
+        @app.get("/iec/checkpoints")
+        async def iec_checkpoint_list():
+            """List IEC checkpoints."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            if self.checkpoints is None:
+                return {"checkpoints": []}
+            return {"checkpoints": self._iec.list_checkpoints(self.checkpoints)}
+
+        @app.get("/iec/features")
+        async def iec_features():
+            """Get per-channel feature maps from all layers."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            try:
+                return self._iec.get_feature_maps(n=1)
+            except Exception as e:
+                return JSONResponse(
+                    {"error": f"Feature maps failed: {e}"}, status_code=500
+                )
 
         @app.post("/iec/teardown")
         async def iec_teardown():

@@ -11,6 +11,8 @@ import type {
   IecSetupResponse,
   IecReconstructions,
   IecStepResponse,
+  IecCheckpoint,
+  IecFeatureMaps,
 } from './iec-types';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +33,10 @@ export interface IecStore {
   stepLoading: boolean;
   /** Toast message */
   toast: string | null;
+  /** Saved checkpoints */
+  checkpoints: IecCheckpoint[];
+  /** Feature maps from last fetch */
+  featureMaps: IecFeatureMaps | null;
 }
 
 const EMPTY_STATE: IecState = {
@@ -53,6 +59,8 @@ const INITIAL: IecStore = {
   setupLoading: false,
   stepLoading: false,
   toast: null,
+  checkpoints: [],
+  featureMaps: null,
 };
 
 export const $iec = atom<IecStore>(INITIAL);
@@ -68,6 +76,8 @@ export const $iecStepLoading = computed($iec, s => s.stepLoading);
 export const $iecToast = computed($iec, s => s.toast);
 export const $iecLossHistory = computed($iec, s => s.lossHistory);
 export const $iecNormalize = computed($iec, s => s.normalize);
+export const $iecCheckpoints = computed($iec, s => s.checkpoints);
+export const $iecFeatureMaps = computed($iec, s => s.featureMaps);
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -182,10 +192,28 @@ export async function mutateIec(type: string, params: Record<string, unknown> = 
   const prev = $iec.get();
   $iec.set({ ...prev, stepLoading: true, toast: null });
 
-  const result = await postJSON<IecMutateResponse>('/iec/mutate', { type, ...params });
-  const cur = $iec.get();
-
-  if (result) {
+  try {
+    const resp = await fetch(`${import.meta.env.DEV ? '/api' : ''}/iec/mutate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, ...params }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const cur = $iec.get();
+    if (!resp.ok) {
+      let msg = `Mutation failed (${resp.status})`;
+      try {
+        const err = await resp.json();
+        if (err.error) msg = err.error;
+      } catch { /* use generic msg */ }
+      $iec.set({ ...cur, stepLoading: false, toast: msg });
+      setTimeout(() => {
+        const c = $iec.get();
+        if (c.toast === msg) $iec.set({ ...c, toast: null });
+      }, 4000);
+      return;
+    }
+    const result = await resp.json() as IecMutateResponse;
     const { reconstructions, ...stateFields } = result;
     $iec.set({
       ...cur,
@@ -193,12 +221,14 @@ export async function mutateIec(type: string, params: Record<string, unknown> = 
       state: stateFields,
       reconstructions: reconstructions ?? cur.reconstructions,
     });
-  } else {
-    $iec.set({ ...cur, stepLoading: false, toast: 'Mutation failed' });
+  } catch (e) {
+    const cur = $iec.get();
+    const msg = `Mutation error: ${e}`;
+    $iec.set({ ...cur, stepLoading: false, toast: msg });
     setTimeout(() => {
       const c = $iec.get();
-      if (c.toast === 'Mutation failed') $iec.set({ ...c, toast: null });
-    }, 3000);
+      if (c.toast === msg) $iec.set({ ...c, toast: null });
+    }, 4000);
   }
 }
 
@@ -239,6 +269,67 @@ export async function resetIec() {
   await setupIec();
 }
 
+/** Save a checkpoint with given tag. */
+export async function saveCheckpoint(tag: string) {
+  const result = await postJSON<{ status: string; checkpoint: IecCheckpoint }>('/iec/checkpoint/save', { tag });
+  if (result && result.checkpoint) {
+    const prev = $iec.get();
+    $iec.set({ ...prev, checkpoints: [...prev.checkpoints, result.checkpoint] });
+  }
+}
+
+/** Load a checkpoint by ID. Rebuilds model from stored genome. */
+export async function loadCheckpoint(id: string) {
+  const prev = $iec.get();
+  $iec.set({ ...prev, stepLoading: true, toast: null });
+
+  try {
+    const resp = await fetch(`${import.meta.env.DEV ? '/api' : ''}/iec/checkpoint/load`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const cur = $iec.get();
+    if (!resp.ok) {
+      let msg = `Load failed (${resp.status})`;
+      try { const err = await resp.json(); if (err.error) msg = err.error; } catch {}
+      $iec.set({ ...cur, stepLoading: false, toast: msg });
+      return;
+    }
+    const result = await resp.json() as IecMutateResponse;
+    const { reconstructions, ...stateFields } = result;
+    $iec.set({
+      ...cur,
+      stepLoading: false,
+      state: stateFields,
+      reconstructions: reconstructions ?? cur.reconstructions,
+      lossHistory: [],  // Fresh start after load
+    });
+  } catch (e) {
+    const cur = $iec.get();
+    $iec.set({ ...cur, stepLoading: false, toast: `Load error: ${e}` });
+  }
+}
+
+/** Fetch list of IEC checkpoints. */
+export async function fetchCheckpoints() {
+  const result = await fetchJSON<{ checkpoints: IecCheckpoint[] }>('/iec/checkpoints');
+  if (result) {
+    const prev = $iec.get();
+    $iec.set({ ...prev, checkpoints: result.checkpoints });
+  }
+}
+
+/** Fetch feature maps from all layers. */
+export async function fetchFeatureMaps() {
+  const result = await fetchJSON<IecFeatureMaps>('/iec/features');
+  if (result) {
+    const prev = $iec.get();
+    $iec.set({ ...prev, featureMaps: result });
+  }
+}
+
 /** Auto-setup: check if session exists, set up if not. */
 export async function ensureIecSession() {
   const state = await fetchJSON<IecState>('/iec/state');
@@ -246,7 +337,9 @@ export async function ensureIecSession() {
     const prev = $iec.get();
     $iec.set({ ...prev, state });
     await fetchReconstructions();
+    await fetchCheckpoints();
     return;
   }
   await setupIec();
+  await fetchCheckpoints();
 }

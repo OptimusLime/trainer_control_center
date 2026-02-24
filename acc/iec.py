@@ -36,6 +36,7 @@ from acc.model_output import ModelOutput
 from acc.trainer import Trainer
 from acc.tasks.reconstruction import ReconstructionTask
 from acc.dataset import AccDataset
+from acc.checkpoints import CheckpointStore
 
 
 def _tensor_to_base64(tensor: torch.Tensor) -> str:
@@ -343,6 +344,198 @@ class IECSession:
         self._build_trainer()
 
         return self.get_state()
+
+    # -- Checkpoints (M-IEC-4) --
+
+    def save_checkpoint(self, tag: str, checkpoint_store: CheckpointStore) -> dict:
+        """Save current genome + weights as a checkpoint.
+
+        Uses CheckpointStore.save() — the genome is stored in model_config
+        via model.config() automatically. step_count and last_loss go into metrics.
+
+        Returns:
+            Checkpoint metadata dict.
+        """
+        if self.model is None or self.trainer is None:
+            raise RuntimeError("No active IEC session")
+
+        metrics = {
+            "iec_step": self.step_count,
+            "iec_last_loss": self.last_loss,
+        }
+        cp = checkpoint_store.save(
+            self.model,
+            self.trainer,
+            tag=tag,
+            recipe_name="iec",
+            description=f"IEC checkpoint at step {self.step_count}",
+            metrics=metrics,
+        )
+        return cp.to_dict()
+
+    def load_checkpoint(
+        self, checkpoint_id: str, checkpoint_store: CheckpointStore
+    ) -> dict:
+        """Load a checkpoint: rebuild model from stored genome, restore weights.
+
+        Flow:
+        1. load_metadata() to get genome from model_config
+        2. Rebuild ConvCPPN from genome
+        3. Rebuild trainer
+        4. load_model_only() to restore just the weights
+
+        Returns:
+            Full session state dict.
+        """
+        if self.device is None or self.dataset is None:
+            raise RuntimeError("No active IEC session")
+
+        # 1. Get metadata (genome lives in model_config)
+        cp = checkpoint_store.load_metadata(checkpoint_id)
+        genome_dict = cp.model_config.get("genome")
+        if genome_dict is None:
+            raise ValueError(
+                f"Checkpoint {checkpoint_id} has no genome in model_config — "
+                f"not an IEC checkpoint?"
+            )
+
+        # 2. Rebuild model from genome
+        self.genome = ConvCPPNGenome.from_dict(genome_dict)
+        self.model = ConvCPPN.from_genome(self.genome).to(self.device)
+
+        # 3. Rebuild trainer (fresh optimizer — appropriate for architecture changes)
+        self._build_trainer()
+
+        # 4. Load just the model weights
+        checkpoint_store.load_model_only(checkpoint_id, self.model, device=self.device)
+
+        # Restore step count and loss from metrics
+        self.step_count = cp.metrics.get("iec_step", 0)
+        self.last_loss = cp.metrics.get("iec_last_loss", None)
+
+        # Clear undo stack — loading a checkpoint is a fresh starting point
+        self.undo_stack = []
+
+        return self.get_state()
+
+    def list_checkpoints(self, checkpoint_store: CheckpointStore) -> list[dict]:
+        """List IEC checkpoints (filtered by recipe_name='iec').
+
+        Returns:
+            List of checkpoint metadata dicts.
+        """
+        return [
+            cp.to_dict() for cp in checkpoint_store.tree() if cp.recipe_name == "iec"
+        ]
+
+    # -- Feature Maps (M-IEC-4) --
+
+    def get_feature_maps(self, n: int = 1) -> dict:
+        """Extract per-channel feature maps from all layers via forward hooks.
+
+        Runs inference on n images and captures each ConvCPPNLayer's output.
+        Returns per-channel activations as 2D number arrays (for InspectHeatmap).
+
+        Args:
+            n: Number of images to run (returns feature maps for the first one).
+
+        Returns:
+            {
+                "input_image": "base64_png",
+                "encoder": [
+                    {
+                        "name": "enc_0",
+                        "resolution": [H, W],
+                        "channels": [
+                            {"activation": "identity", "data": [[...], ...]},
+                            ...
+                        ]
+                    },
+                    ...
+                ],
+                "decoder": [ same structure ],
+            }
+        """
+        if self.model is None or self.dataset is None:
+            raise RuntimeError("No active IEC session")
+
+        activations: dict[str, torch.Tensor] = {}
+        hooks = []
+
+        # Register forward hooks on all ConvCPPNLayers
+        for i, layer in enumerate(self.model.encoder_layers):
+            name = f"enc_{i}"
+
+            def hook_fn(mod, inp, out, name=name):
+                activations[name] = out.detach()
+
+            hooks.append(layer.register_forward_hook(hook_fn))
+
+        for i, layer in enumerate(self.model.decoder_layers):
+            name = f"dec_{i}"
+
+            def hook_fn(mod, inp, out, name=name):
+                activations[name] = out.detach()
+
+            hooks.append(layer.register_forward_hook(hook_fn))
+
+        # Run forward pass
+        self.model.eval()
+        with torch.no_grad():
+            images = self.dataset.sample(n).to(self.device)
+            self.model(images)
+
+        # Remove hooks
+        for h in hooks:
+            h.remove()
+
+        self.model.train()
+
+        # Build response — use first image
+        input_img = _tensor_to_base64(images[0])
+
+        def _layer_maps(prefix: str, genome_layers, count: int) -> list:
+            result = []
+            for i in range(count):
+                name = f"{prefix}_{i}"
+                act_tensor = activations.get(name)
+                if act_tensor is None:
+                    continue
+                # act_tensor is [B, C, H, W] — take first image
+                per_image = act_tensor[0]  # [C, H, W]
+                C, H, W = per_image.shape
+                channels = []
+                for c in range(C):
+                    ch_data = per_image[c].cpu().numpy().tolist()  # [[...], ...]
+                    act_name = (
+                        genome_layers[i].channel_descriptors[c].activation
+                        if c < len(genome_layers[i].channel_descriptors)
+                        else "?"
+                    )
+                    channels.append(
+                        {
+                            "activation": act_name,
+                            "data": ch_data,
+                        }
+                    )
+                result.append(
+                    {
+                        "name": name,
+                        "resolution": [H, W],
+                        "channels": channels,
+                    }
+                )
+            return result
+
+        return {
+            "input_image": input_img,
+            "encoder": _layer_maps(
+                "enc", self.genome.encoder_layers, len(self.model.encoder_layers)
+            ),
+            "decoder": _layer_maps(
+                "dec", self.genome.decoder_layers, len(self.model.decoder_layers)
+            ),
+        }
 
     def teardown(self):
         """Clean up all session state."""

@@ -63,3 +63,32 @@ export interface IecStepResponse {
   last_loss: number;
   reconstructions?: IecReconstructions;
 }
+
+export interface IecCheckpoint {
+  id: string;
+  tag: string;
+  parent_id: string | null;
+  step: number;
+  timestamp: string;
+  recipe_name: string | null;
+  description: string | null;
+  model_config: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+}
+
+export interface IecFeatureChannel {
+  activation: string;
+  data: number[][];
+}
+
+export interface IecFeatureLayer {
+  name: string;
+  resolution: [number, number];
+  channels: IecFeatureChannel[];
+}
+
+export interface IecFeatureMaps {
+  input_image: string;  // base64 PNG
+  encoder: IecFeatureLayer[];
+  decoder: IecFeatureLayer[];
+}
