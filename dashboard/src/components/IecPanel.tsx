@@ -668,6 +668,8 @@ function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations, genome
                 highlightChannel={highlight}
                 normalizeActivations={normalizeActivations}
               />
+            ) : slot.label === 'latent' && slot.layer ? (
+              <LatentColumnMaps layer={slot.layer} normalizeActivations={normalizeActivations} />
             ) : slot.layer && slot.side ? (
               <FeatureColumnMaps
                 layer={slot.layer}
@@ -740,6 +742,37 @@ function InputColumnMaps({ inputImage }: { inputImage: string }) {
         <MiniHeatmap data={COORD_28.g} width={dispW} height={dispH} />
         <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>Gauss</span>
       </div>
+    </>
+  );
+}
+
+/** Latent/bottleneck column: show each channel's 3x3 activation + gradient. No kernels. */
+function LatentColumnMaps({ layer, normalizeActivations }: {
+  layer: IecFeatureLayer;
+  normalizeActivations: boolean;
+}) {
+  const [H, W] = layer.resolution;
+  const cellSize = Math.max(4, Math.min(12, Math.floor(40 / Math.max(H, W))));
+  const dispW = W * cellSize;
+  const dispH = H * cellSize;
+
+  return (
+    <>
+      {layer.channels.map((ch, ci) => (
+        <div key={ci} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          border: '2px solid transparent',
+          borderRadius: 3, padding: 1, marginBottom: 3,
+        }}>
+          <MiniHeatmap data={ch.data} width={dispW} height={dispH} normalize={normalizeActivations} />
+          {ch.grad && (
+            <GradHeatmap data={ch.grad} width={dispW} height={dispH} />
+          )}
+          <span style={{ fontSize: 7, color: '#484f58', lineHeight: 1 }}>
+            {ch.activation}
+          </span>
+        </div>
+      ))}
     </>
   );
 }
