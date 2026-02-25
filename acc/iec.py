@@ -31,7 +31,9 @@ from acc.models.conv_cppn import (
     add_decoder_layer,
     remove_decoder_layer,
     toggle_coords,
+    toggle_freeze,
     transfer_weights,
+    KERNEL_PRESETS,
 )
 from acc.model_output import ModelOutput
 from acc.trainer import Trainer
@@ -530,13 +532,21 @@ class IECSession:
                 side=kwargs["side"],
                 layer_idx=int(kwargs["layer_idx"]),
             )
+        elif mutation_type == "toggle_freeze":
+            self.genome = toggle_freeze(
+                old_genome,
+                side=kwargs["side"],
+                layer_idx=int(kwargs["layer_idx"]),
+                channel_idx=int(kwargs["channel_idx"]),
+            )
         else:
             # Roll back — invalid mutation type
             self.undo_stack.pop()
             raise ValueError(
                 f"Unknown mutation type '{mutation_type}'. "
                 f"Available: add_channel, remove_channel, change_activation, "
-                f"add_connection, remove_connection, add_layer, remove_layer"
+                f"add_connection, remove_connection, add_layer, remove_layer, "
+                f"toggle_coords, toggle_freeze"
             )
 
         # Build new model and transfer weights
@@ -567,6 +577,104 @@ class IECSession:
         self._build_trainer()
 
         return self.get_state()
+
+    # -- Kernel Editing (M-IEC-6) --
+
+    def set_kernel(
+        self,
+        side: str,
+        layer_idx: int,
+        out_ch: int,
+        in_ch: int,
+        values: list[list[float]],
+        auto_freeze: bool = True,
+    ) -> dict:
+        """Set a specific kernel's weights directly.
+
+        This is a weight-level operation (not a genome mutation), but we
+        push to the undo stack so the user can revert.
+
+        Args:
+            side: 'encoder' or 'decoder'.
+            layer_idx: Which layer (0-indexed).
+            out_ch: Output channel index.
+            in_ch: Input channel index (relative to connection mask).
+            values: 2D list of kernel weights (e.g. 3x3).
+            auto_freeze: If True, freeze this channel after editing.
+
+        Returns:
+            Full state dict.
+        """
+        if self.model is None or self.genome is None:
+            raise RuntimeError("No active IEC session")
+
+        # Push current state to undo stack (captures weights + genome)
+        self.undo_stack.append(
+            (
+                self.genome.to_dict(),
+                {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
+            )
+        )
+        if len(self.undo_stack) > self._UNDO_STACK_MAX:
+            self.undo_stack.pop(0)
+
+        # Validate indices
+        layers = (
+            self.genome.encoder_layers
+            if side == "encoder"
+            else self.genome.decoder_layers
+        )
+        if layer_idx < 0 or layer_idx >= len(layers):
+            raise ValueError(f"Layer index {layer_idx} out of range for {side}")
+
+        layer_genome = layers[layer_idx]
+        if out_ch < 0 or out_ch >= len(layer_genome.channel_descriptors):
+            raise ValueError(
+                f"out_ch {out_ch} out of range "
+                f"(layer has {len(layer_genome.channel_descriptors)} channels)"
+            )
+
+        # Get the model layer
+        model_layers = (
+            self.model.encoder_layers
+            if side == "encoder"
+            else self.model.decoder_layers
+        )
+        model_layer = model_layers[layer_idx]
+
+        # Validate in_ch against actual weight shape
+        weight = model_layer.conv.weight  # [C_out, C_in, K, K]
+        if in_ch < 0 or in_ch >= weight.shape[1]:
+            raise ValueError(
+                f"in_ch {in_ch} out of range (weight has {weight.shape[1]} input channels)"
+            )
+
+        # Validate kernel dimensions
+        import torch
+
+        kernel_tensor = torch.tensor(values, dtype=weight.dtype, device=weight.device)
+        if kernel_tensor.shape != weight.shape[2:]:
+            raise ValueError(
+                f"Kernel shape {list(kernel_tensor.shape)} doesn't match "
+                f"weight kernel shape {list(weight.shape[2:])}"
+            )
+
+        # Set the kernel weights
+        with torch.no_grad():
+            weight[out_ch, in_ch] = kernel_tensor
+
+        # Auto-freeze the channel so SGD doesn't overwrite the manual edit
+        if auto_freeze:
+            layer_genome.channel_descriptors[out_ch].frozen = True
+            # Update frozen_channels list in the model layer
+            if out_ch not in model_layer.frozen_channels:
+                model_layer.frozen_channels.append(out_ch)
+
+        return self.get_state()
+
+    def get_kernel_presets(self) -> dict[str, list[list[float]]]:
+        """Return available kernel presets."""
+        return KERNEL_PRESETS
 
     # -- Checkpoints (M-IEC-4) --
 
@@ -796,12 +904,19 @@ class IECSession:
                         if c < len(genome_layers[i].channel_descriptors)
                         else "?"
                     )
+                    is_frozen = (
+                        genome_layers[i].channel_descriptors[c].frozen
+                        if c < len(genome_layers[i].channel_descriptors)
+                        else False
+                    )
                     entry: dict = {"activation": act_name, "data": ch_data}
                     if ch_grad is not None:
                         entry["grad"] = ch_grad
                     kernels = _extract_kernels(name, c)
                     if kernels is not None:
                         entry["kernels"] = kernels
+                    if is_frozen:
+                        entry["frozen"] = True
                     channels.append(entry)
                 result.append(
                     {

@@ -95,6 +95,7 @@ export interface IecFeatureChannel {
   data: number[][];
   grad?: number[][];      // gradient w.r.t. reconstruction loss
   kernels?: number[][][];  // per-connected-input KxK kernel weights
+  frozen?: boolean;        // channel frozen from SGD
 }
 
 export interface IecFeatureLayer {

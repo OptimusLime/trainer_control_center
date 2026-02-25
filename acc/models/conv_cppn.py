@@ -51,14 +51,15 @@ class ChannelDescriptor:
     activation: str  # key into ACTIVATION_REGISTRY
     is_passthrough: bool = False  # identity relay for skip connections
     passthrough_source: int = -1  # source channel idx in previous layer
-    frozen: bool = False  # pass-through weights don't train
+    frozen: bool = False  # frozen channels' weights are not updated by SGD
 
     def to_dict(self) -> dict:
         d: dict = {"activation": self.activation}
         if self.is_passthrough:
             d["is_passthrough"] = True
             d["passthrough_source"] = self.passthrough_source
-            d["frozen"] = self.frozen
+        if self.frozen:
+            d["frozen"] = True
         return d
 
     @classmethod
@@ -360,6 +361,14 @@ class ConvCPPNLayer(nn.Module):
             with torch.no_grad():
                 self.conv.weight.data *= self.conn_mask
 
+        # Auto-zero masked/frozen gradients after every backward pass.
+        # We hook the weight parameter directly — this fires after the
+        # gradient is accumulated, before optimizer.step().
+        # Hook both weight and bias to cover frozen channels completely.
+        self.conv.weight.register_post_accumulate_grad_hook(self._make_grad_hook())
+        if self.conv.bias is not None:
+            self.conv.bias.register_post_accumulate_grad_hook(self._make_grad_hook())
+
     def _init_passthroughs(self):
         """Set pass-through channels to identity kernel."""
         with torch.no_grad():
@@ -395,10 +404,23 @@ class ConvCPPNLayer(nn.Module):
 
         return self.activation(out)
 
+    def _make_grad_hook(self):
+        """Create a gradient hook that zeros masked/frozen gradients.
+
+        Returns a closure for register_post_accumulate_grad_hook.
+        """
+        layer = self
+
+        def hook(param: torch.Tensor):
+            layer.zero_masked_grads()
+
+        return hook
+
     def zero_masked_grads(self):
         """Zero gradients for masked connections and frozen channels.
 
         Call after loss.backward(), before optimizer.step().
+        Also called automatically via _backward_hook.
         """
         if self.conv.weight.grad is not None:
             # Only multiply by mask if mask has zeros (skip for all-ones masks)
@@ -880,6 +902,95 @@ def toggle_coords(
                     row.pop()
 
     return genome
+
+
+def toggle_freeze(
+    genome: ConvCPPNGenome,
+    side: str,
+    layer_idx: int,
+    channel_idx: int,
+) -> ConvCPPNGenome:
+    """Toggle frozen state for a specific channel.
+
+    Frozen channels have their weights and biases excluded from SGD updates
+    (gradients zeroed in zero_masked_grads). This does NOT change the model
+    architecture — just a genome flag. No model rebuild needed, but we
+    deepcopy the genome for undo stack consistency.
+
+    Args:
+        genome: Source genome (not mutated).
+        side: 'encoder' or 'decoder'.
+        layer_idx: Which layer (0-indexed).
+        channel_idx: Which channel (0-indexed).
+
+    Returns:
+        New genome with toggled frozen state.
+    """
+    genome = copy.deepcopy(genome)
+    layers = genome.encoder_layers if side == "encoder" else genome.decoder_layers
+
+    if layer_idx < 0 or layer_idx >= len(layers):
+        raise ValueError(f"Layer index {layer_idx} out of range for {side}")
+
+    layer = layers[layer_idx]
+    if channel_idx < 0 or channel_idx >= len(layer.channel_descriptors):
+        raise ValueError(
+            f"Channel index {channel_idx} out of range "
+            f"(layer has {len(layer.channel_descriptors)} channels)"
+        )
+
+    layer.channel_descriptors[channel_idx].frozen = not layer.channel_descriptors[
+        channel_idx
+    ].frozen
+    return genome
+
+
+# ---------------------------------------------------------------------------
+# Kernel presets — known useful 3x3 patterns for manual kernel editing
+# ---------------------------------------------------------------------------
+
+KERNEL_PRESETS: dict[str, list[list[float]]] = {
+    "identity": [
+        [0, 0, 0],
+        [0, 1, 0],
+        [0, 0, 0],
+    ],
+    "h_edge": [
+        [-1, -1, -1],
+        [0, 0, 0],
+        [1, 1, 1],
+    ],
+    "v_edge": [
+        [-1, 0, 1],
+        [-1, 0, 1],
+        [-1, 0, 1],
+    ],
+    "blur": [
+        [1 / 9, 1 / 9, 1 / 9],
+        [1 / 9, 1 / 9, 1 / 9],
+        [1 / 9, 1 / 9, 1 / 9],
+    ],
+    "sharpen": [
+        [0, -1, 0],
+        [-1, 5, -1],
+        [0, -1, 0],
+    ],
+    "diagonal": [
+        [1 / 3, 0, 0],
+        [0, 1 / 3, 0],
+        [0, 0, 1 / 3],
+    ],
+    "laplacian": [
+        [0, 1, 0],
+        [1, -4, 1],
+        [0, 1, 0],
+    ],
+    "emboss": [
+        [-2, -1, 0],
+        [-1, 1, 1],
+        [0, 1, 2],
+    ],
+}
 
 
 def add_encoder_layer(

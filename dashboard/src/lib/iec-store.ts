@@ -372,6 +372,61 @@ export async function fetchFeatureMaps() {
   }
 }
 
+/** Set a specific kernel's weights. Returns updated state + reconstructions. */
+export async function setKernel(
+  side: string,
+  layerIdx: number,
+  outCh: number,
+  inCh: number,
+  values: number[][],
+  autoFreeze: boolean = true,
+) {
+  const prev = $iec.get();
+  $iec.set({ ...prev, stepLoading: true, toast: null });
+
+  try {
+    const resp = await fetch(`${import.meta.env.DEV ? '/api' : ''}/iec/set_kernel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        side,
+        layer_idx: layerIdx,
+        out_ch: outCh,
+        in_ch: inCh,
+        values,
+        auto_freeze: autoFreeze,
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const cur = $iec.get();
+    if (!resp.ok) {
+      let msg = `Set kernel failed (${resp.status})`;
+      try { const err = await resp.json(); if (err.error) msg = err.error; } catch {}
+      $iec.set({ ...cur, stepLoading: false, toast: msg });
+      setTimeout(() => { const c = $iec.get(); if (c.toast === msg) $iec.set({ ...c, toast: null }); }, 4000);
+      return;
+    }
+    const result = await resp.json() as IecMutateResponse;
+    const { reconstructions, ...stateFields } = result;
+    $iec.set({
+      ...cur,
+      stepLoading: false,
+      state: stateFields,
+      reconstructions: reconstructions ?? cur.reconstructions,
+    });
+  } catch (e) {
+    const cur = $iec.get();
+    const msg = `Set kernel error: ${e}`;
+    $iec.set({ ...cur, stepLoading: false, toast: msg });
+    setTimeout(() => { const c = $iec.get(); if (c.toast === msg) $iec.set({ ...c, toast: null }); }, 4000);
+  }
+}
+
+/** Fetch available kernel presets. */
+export async function fetchKernelPresets(): Promise<Record<string, number[][]> | null> {
+  return await fetchJSON<Record<string, number[][]>>('/iec/kernel_presets');
+}
+
 /** Auto-setup: check if session exists, set up if not.
  *  Retries up to 5 times with 2s delay if trainer isn't ready yet. */
 export async function ensureIecSession() {

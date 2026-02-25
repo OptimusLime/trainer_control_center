@@ -2093,6 +2093,42 @@ class TrainerAPI:
             except ValueError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
 
+        @app.post("/iec/set_kernel")
+        async def iec_set_kernel(request: Request):
+            """Set a specific kernel's weights directly.
+
+            Body: { side, layer_idx, out_ch, in_ch, values: [[...]], auto_freeze?: bool }
+            Returns updated state + reconstructions.
+            """
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            data = await request.json()
+            try:
+                state = self._iec.set_kernel(
+                    side=data["side"],
+                    layer_idx=int(data["layer_idx"]),
+                    out_ch=int(data["out_ch"]),
+                    in_ch=int(data["in_ch"]),
+                    values=data["values"],
+                    auto_freeze=data.get("auto_freeze", True),
+                )
+                state["reconstructions"] = self._iec.get_reconstructions()
+                return state
+            except (ValueError, KeyError) as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            except Exception as e:
+                return JSONResponse(
+                    {"error": f"Set kernel failed: {type(e).__name__}: {e}"},
+                    status_code=500,
+                )
+
+        @app.get("/iec/kernel_presets")
+        async def iec_kernel_presets():
+            """Get available kernel preset patterns."""
+            if self._iec is None:
+                return JSONResponse({"error": "No IEC session"}, status_code=400)
+            return self._iec.get_kernel_presets()
+
         @app.post("/iec/teardown")
         async def iec_teardown():
             """Tear down the IEC session."""

@@ -35,11 +35,23 @@ import {
   fetchFeatureMaps,
   setSsimWeight,
   setTaskConfig,
+  setKernel,
+  fetchKernelPresets,
 } from '../lib/iec-store';
 import { useEffect, useState, useRef, useCallback } from 'react';
 import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer, IecTaskConfig } from '../lib/iec-types';
 import IecArchGraph from './IecArchGraph';
 import type { ChannelSelection } from './IecArchGraph';
+
+/** Identifies which kernel is being edited. */
+interface KernelEditTarget {
+  side: 'encoder' | 'decoder';
+  layerIdx: number;
+  channelIdx: number;
+  kernelIdx: number;   // which input connection (index into connected inputs)
+  inCh: number;        // actual input channel index in the weight tensor
+  values: number[][];  // current kernel values (copied for editing)
+}
 
 export default function IecPanel() {
   const state = useStore($iecState);
@@ -56,8 +68,15 @@ export default function IecPanel() {
   const [cpTag, setCpTag] = useState('');
   const [selectedChannel, setSelectedChannel] = useState<ChannelSelection | null>(null);
   const [normalizeActivations, setNormalizeActivations] = useState(true);
+  const [kernelEdit, setKernelEdit] = useState<KernelEditTarget | null>(null);
+  const [kernelPresets, setKernelPresets] = useState<Record<string, number[][]> | null>(null);
 
   useEffect(() => { ensureIecSession(); }, []);
+
+  // Fetch kernel presets once on mount
+  useEffect(() => {
+    fetchKernelPresets().then(p => { if (p) setKernelPresets(p); });
+  }, []);
 
   if (setupLoading) return <div style={{ color: '#8b949e', padding: 20 }}>Setting up IEC session...</div>;
   if (!state.active) return (
@@ -222,13 +241,33 @@ export default function IecPanel() {
                     normalize
                   </label>
                 </div>
-                <FeatureMapDisplay maps={featureMaps} selectedChannel={selectedChannel} normalizeActivations={normalizeActivations} />
+                <FeatureMapDisplay maps={featureMaps} selectedChannel={selectedChannel} normalizeActivations={normalizeActivations}
+                  genome={genome}
+                  onKernelClick={(side, layerIdx, channelIdx, kernelIdx, inCh, values) => {
+                    setKernelEdit({ side, layerIdx, channelIdx, kernelIdx, inCh, values: values.map(r => [...r]) });
+                  }} />
               </>
             ) : (
               <div style={{ ...dimText, fontSize: 10 }}>Loading feature maps...</div>
             )}
           </div>
         </div>
+      )}
+
+      {/* Kernel Editor — appears when a kernel is clicked in the feature map strip */}
+      {kernelEdit && (
+        <KernelEditor
+          target={kernelEdit}
+          presets={kernelPresets}
+          busy={busy}
+          onApply={async (values, autoFreeze) => {
+            await setKernel(kernelEdit.side, kernelEdit.layerIdx, kernelEdit.channelIdx, kernelEdit.inCh, values, autoFreeze);
+            setKernelEdit(null);
+            await fetchFeatureMaps();
+          }}
+          onClose={() => setKernelEdit(null)}
+          onChange={(values) => setKernelEdit({ ...kernelEdit, values })}
+        />
       )}
 
       {/* Architecture: Encoder + Decoder side by side */}
@@ -467,13 +506,36 @@ function ChannelPill({ ch, side, layerIdx, channelIdx, activations, busy, canRem
   canRemove: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const frozen = ch.frozen ?? false;
 
   return (
     <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 0 }}>
       {/* Activation name button -- click to open popover */}
       <button onClick={() => setOpen(!open)} disabled={busy}
-        style={{ ...pillBtn, borderRadius: canRemove ? '4px 0 0 4px' : 4, background: actColor(ch.activation) }}>
+        style={{
+          ...pillBtn,
+          borderRadius: (frozen || canRemove) ? '4px 0 0 4px' : 4,
+          background: actColor(ch.activation),
+          borderColor: frozen ? '#79c0ff' : '#30363d',
+        }}>
         {ch.activation}
+      </button>
+
+      {/* Freeze toggle */}
+      <button disabled={busy}
+        onClick={() => mutateIec('toggle_freeze', { side, layer_idx: layerIdx, channel_idx: channelIdx })}
+        style={{
+          ...pillBtn,
+          borderRadius: canRemove ? 0 : '0 4px 4px 0',
+          borderLeft: 'none',
+          fontSize: 10,
+          padding: '2px 4px',
+          color: frozen ? '#79c0ff' : '#484f58',
+          background: frozen ? '#1a2940' : 'transparent',
+          borderColor: frozen ? '#79c0ff' : '#30363d',
+        }}
+        title={frozen ? 'Frozen — click to unfreeze' : 'Click to freeze (SGD will skip this channel)'}>
+        {frozen ? '*' : '.'}
       </button>
 
       {/* Remove button */}
@@ -559,10 +621,12 @@ function LossChart({ losses }: { losses: number[] }) {
  * Horizontal feature map strip — each layer is a column in a flex row.
  * Columns size to their content so nothing overlaps.
  */
-function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations }: {
+function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations, genome, onKernelClick }: {
   maps: IecFeatureMaps;
   selectedChannel: ChannelSelection | null;
   normalizeActivations: boolean;
+  genome: { encoder_layers: IecLayerGenome[]; decoder_layers: IecLayerGenome[] } | null;
+  onKernelClick?: (side: 'encoder' | 'decoder', layerIdx: number, channelIdx: number, kernelIdx: number, inCh: number, values: number[][]) => void;
 }) {
   // Build ordered slots: Input | E0..En | Latent | D0..Dn(Out)
   const slots: { layer: IecFeatureLayer | null; side: 'encoder' | 'decoder' | null; layerIdx: number; label: string }[] = [];
@@ -582,6 +646,10 @@ function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations }: {
         const highlight = selectedChannel && slot.side === selectedChannel.side && slot.layerIdx === selectedChannel.layerIdx
           ? selectedChannel.channelIdx : null;
 
+        // Get the genome layer for this slot (needed for connection mask → inCh mapping)
+        const genomeLayers = slot.side === 'encoder' ? genome?.encoder_layers : slot.side === 'decoder' ? genome?.decoder_layers : null;
+        const genomeLayer = genomeLayers && slot.layerIdx >= 0 && slot.layerIdx < genomeLayers.length ? genomeLayers[slot.layerIdx] : null;
+
         return (
           <div key={si} style={{
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
@@ -599,8 +667,16 @@ function FeatureMapDisplay({ maps, selectedChannel, normalizeActivations }: {
                 highlightChannel={highlight}
                 normalizeActivations={normalizeActivations}
               />
-            ) : slot.layer ? (
-              <FeatureColumnMaps layer={slot.layer} highlightChannel={highlight} normalizeActivations={normalizeActivations} />
+            ) : slot.layer && slot.side ? (
+              <FeatureColumnMaps
+                layer={slot.layer}
+                highlightChannel={highlight}
+                normalizeActivations={normalizeActivations}
+                genomeLayer={genomeLayer}
+                side={slot.side}
+                layerIdx={slot.layerIdx}
+                onKernelClick={onKernelClick}
+              />
             ) : (
               <span style={{ fontSize: 9, color: '#30363d' }}>--</span>
             )}
@@ -709,8 +785,16 @@ function OutputColumnMaps({ layer, reconImage, errorMap, highlightChannel, norma
 }
 
 /** A single column of channel heatmaps stacked vertically.
- *  Each channel: activation heatmap + gradient heatmap + kernel weights. */
-function FeatureColumnMaps({ layer, highlightChannel, normalizeActivations }: { layer: IecFeatureLayer; highlightChannel: number | null; normalizeActivations: boolean }) {
+ *  Each channel: activation heatmap + gradient heatmap + kernel weights (clickable). */
+function FeatureColumnMaps({ layer, highlightChannel, normalizeActivations, genomeLayer, side, layerIdx, onKernelClick }: {
+  layer: IecFeatureLayer;
+  highlightChannel: number | null;
+  normalizeActivations: boolean;
+  genomeLayer: IecLayerGenome | null;
+  side: 'encoder' | 'decoder';
+  layerIdx: number;
+  onKernelClick?: (side: 'encoder' | 'decoder', layerIdx: number, channelIdx: number, kernelIdx: number, inCh: number, values: number[][]) => void;
+}) {
   const [H, W] = layer.resolution;
   const cellSize = Math.max(2, Math.min(5, Math.floor(40 / Math.max(H, W))));
   const dispW = W * cellSize;
@@ -718,33 +802,65 @@ function FeatureColumnMaps({ layer, highlightChannel, normalizeActivations }: { 
   // Kernel display: 3x3 kernels at a readable size
   const kSize = 14; // px per kernel cell → 42px for a 3x3 kernel
 
+  // Build kernel index → actual in_ch mapping from connection mask
+  // kernels only include connected inputs (mask==1), so kernel[ki] maps to
+  // the ki-th connected input channel
+  const getInCh = (channelIdx: number, kernelIdx: number): number => {
+    if (!genomeLayer) return kernelIdx;
+    const mask = genomeLayer.connection_mask;
+    if (channelIdx >= mask.length) return kernelIdx;
+    const row = mask[channelIdx];
+    let count = 0;
+    for (let i = 0; i < row.length; i++) {
+      if (row[i] > 0) {
+        if (count === kernelIdx) return i;
+        count++;
+      }
+    }
+    return kernelIdx; // fallback
+  };
+
   return (
     <>
-      {layer.channels.map((ch, ci) => (
-        <div key={ci} style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'center',
-          border: highlightChannel === ci ? '2px solid #f0883e' : '2px solid transparent',
-          borderRadius: 3, padding: 1, marginBottom: 3,
-        }}>
-          <MiniHeatmap data={ch.data} width={dispW} height={dispH} normalize={normalizeActivations} />
-          {ch.grad && (
-            <GradHeatmap data={ch.grad} width={dispW} height={dispH} />
-          )}
-          {/* Kernels: vertical stack of KxK weight patches, grouped with boundary */}
-          {ch.kernels && ch.kernels.length > 0 && (
-            <div style={{
-              display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1,
-              border: '1px solid #30363d', borderRadius: 2, padding: 1,
-              background: '#0d1117',
+      {layer.channels.map((ch, ci) => {
+        const frozen = ch.frozen ?? false;
+        return (
+          <div key={ci} style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            border: highlightChannel === ci ? '2px solid #f0883e' : frozen ? '2px solid #79c0ff' : '2px solid transparent',
+            borderRadius: 3, padding: 1, marginBottom: 3,
+          }}>
+            <MiniHeatmap data={ch.data} width={dispW} height={dispH} normalize={normalizeActivations} />
+            {ch.grad && (
+              <GradHeatmap data={ch.grad} width={dispW} height={dispH} />
+            )}
+            {/* Kernels: vertical stack of KxK weight patches, clickable to edit */}
+            {ch.kernels && ch.kernels.length > 0 && (
+              <div style={{
+                display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1,
+                border: '1px solid #30363d', borderRadius: 2, padding: 1,
+                background: '#0d1117',
+              }}>
+                {ch.kernels.map((k, ki) => (
+                  <div key={ki}
+                    onClick={() => onKernelClick?.(side, layerIdx, ci, ki, getInCh(ci, ki), k)}
+                    style={{ cursor: onKernelClick ? 'pointer' : 'default' }}
+                    title="Click to edit kernel">
+                    <KernelHeatmap data={k} cellSize={kSize} />
+                  </div>
+                ))}
+              </div>
+            )}
+            <span style={{
+              fontSize: 7,
+              color: frozen ? '#79c0ff' : highlightChannel === ci ? '#f0883e' : '#484f58',
+              lineHeight: 1,
             }}>
-              {ch.kernels.map((k, ki) => (
-                <KernelHeatmap key={ki} data={k} cellSize={kSize} />
-              ))}
-            </div>
-          )}
-          <span style={{ fontSize: 7, color: highlightChannel === ci ? '#f0883e' : '#484f58', lineHeight: 1 }}>{ch.activation}</span>
-        </div>
-      ))}
+              {frozen ? `${ch.activation}*` : ch.activation}
+            </span>
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -934,6 +1050,122 @@ function GradHeatmap({ data, width, height }: { data: number[][]; width: number;
   return (
     <canvas ref={canvasRef} width={width} height={height}
       style={{ border: '1px solid #21262d', borderRadius: 2, display: 'block', imageRendering: 'pixelated', marginTop: 1 }} />
+  );
+}
+
+/* -- Kernel Editor -- */
+
+/** Inline editor for a single KxK kernel. Shows editable grid + preset buttons.
+ *  Appears below the feature maps when a kernel heatmap is clicked. */
+function KernelEditor({ target, presets, busy, onApply, onClose, onChange }: {
+  target: KernelEditTarget;
+  presets: Record<string, number[][]> | null;
+  busy: boolean;
+  onApply: (values: number[][], autoFreeze: boolean) => void;
+  onClose: () => void;
+  onChange: (values: number[][]) => void;
+}) {
+  const [autoFreeze, setAutoFreeze] = useState(true);
+  const { side, layerIdx, channelIdx, kernelIdx, values } = target;
+  const rows = values.length;
+  const cols = values[0]?.length ?? 0;
+
+  const updateCell = (r: number, c: number, val: string) => {
+    const v = parseFloat(val);
+    if (isNaN(v)) return;
+    const newValues = values.map(row => [...row]);
+    newValues[r][c] = v;
+    onChange(newValues);
+  };
+
+  const applyPreset = (preset: number[][]) => {
+    // Preset is always 3x3, kernel might be different size — resize if needed
+    if (preset.length === rows && preset[0]?.length === cols) {
+      onChange(preset.map(r => [...r]));
+    } else {
+      // Fill center, zero pad
+      const newValues = Array.from({ length: rows }, () => Array(cols).fill(0));
+      const offR = Math.floor((rows - preset.length) / 2);
+      const offC = Math.floor((cols - (preset[0]?.length ?? 0)) / 2);
+      for (let r = 0; r < preset.length; r++) {
+        for (let c = 0; c < (preset[0]?.length ?? 0); c++) {
+          const tr = r + offR, tc = c + offC;
+          if (tr >= 0 && tr < rows && tc >= 0 && tc < cols) {
+            newValues[tr][tc] = preset[r][c];
+          }
+        }
+      }
+      onChange(newValues);
+    }
+  };
+
+  return (
+    <div style={{
+      ...card, marginBottom: 8,
+      border: '1px solid #58a6ff',
+      background: '#0d1117',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: '#58a6ff', fontWeight: 600 }}>
+          Kernel Editor
+        </span>
+        <span style={{ fontSize: 10, color: '#8b949e', fontFamily: 'monospace' }}>
+          {side} L{layerIdx} ch{channelIdx} in{kernelIdx}
+        </span>
+        <div style={{ flex: 1 }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#8b949e', cursor: 'pointer', userSelect: 'none' }}>
+          <input type="checkbox" checked={autoFreeze} onChange={e => setAutoFreeze(e.target.checked)}
+            style={{ margin: 0, width: 10, height: 10 }} />
+          auto-freeze
+        </label>
+        <button disabled={busy} onClick={() => onApply(values, autoFreeze)}
+          style={{ ...btn, fontSize: 10, padding: '2px 8px', color: '#3fb950', borderColor: '#238636' }}>
+          Apply
+        </button>
+        <button onClick={onClose}
+          style={{ ...btn, fontSize: 10, padding: '2px 8px', color: '#8b949e' }}>
+          Cancel
+        </button>
+      </div>
+
+      {/* Editable grid */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <div style={{ display: 'inline-grid', gridTemplateColumns: `repeat(${cols}, 48px)`, gap: 2 }}>
+          {values.map((row, r) =>
+            row.map((val, c) => (
+              <input
+                key={`${r}-${c}`}
+                type="number"
+                value={val.toFixed(3)}
+                onChange={e => updateCell(r, c, e.target.value)}
+                step="0.1"
+                style={{
+                  width: 48, textAlign: 'center',
+                  background: val > 0 ? '#0a200a' : val < 0 ? '#200a1a' : '#0d1117',
+                  border: '1px solid #30363d', borderRadius: 2,
+                  color: '#e6edf3', fontSize: 10, padding: '2px 2px',
+                  fontFamily: 'monospace',
+                }}
+              />
+            ))
+          )}
+        </div>
+
+        {/* Preset buttons */}
+        {presets && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{ fontSize: 9, color: '#484f58', marginBottom: 1 }}>Presets</span>
+            {Object.entries(presets).map(([name, preset]) => (
+              <button key={name}
+                onClick={() => applyPreset(preset)}
+                style={{ ...btn, fontSize: 9, padding: '2px 6px', textAlign: 'left' }}>
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
