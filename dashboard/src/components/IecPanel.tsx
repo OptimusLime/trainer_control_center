@@ -38,7 +38,7 @@ import {
   setKernel,
   fetchKernelPresets,
 } from '../lib/iec-store';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import type { IecLayerGenome, IecChannelDescriptor, IecLayerResolution, IecFeatureMaps, IecFeatureLayer, IecTaskConfig } from '../lib/iec-types';
 import IecArchGraph from './IecArchGraph';
 import type { ChannelSelection } from './IecArchGraph';
@@ -71,7 +71,8 @@ export default function IecPanel() {
   const [kernelEdit, setKernelEdit] = useState<KernelEditTarget | null>(null);
   const [kernelPresets, setKernelPresets] = useState<Record<string, number[][]> | null>(null);
 
-  useEffect(() => { ensureIecSession(); }, []);
+  // useLayoutEffect fires before paint — avoids flash of "No IEC session"
+  useLayoutEffect(() => { ensureIecSession(); }, []);
 
   // Fetch kernel presets once on mount
   useEffect(() => {

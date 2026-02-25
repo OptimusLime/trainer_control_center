@@ -15,9 +15,13 @@ export async function fetchJSON<T>(path: string): Promise<T | null> {
     const resp = await fetch(`${TRAINER_URL}${path}`, {
       signal: AbortSignal.timeout(8000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      if (resp.status !== 400) console.warn(`fetchJSON ${path}: HTTP ${resp.status}`);
+      return null;
+    }
     return await resp.json() as T;
-  } catch {
+  } catch (e) {
+    console.warn(`fetchJSON ${path}: ${e}`);
     return null;
   }
 }
@@ -31,9 +35,13 @@ export async function postJSON<T>(path: string, body?: unknown): Promise<T | nul
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(60000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.warn(`postJSON ${path}: HTTP ${resp.status}`);
+      return null;
+    }
     return await resp.json() as T;
-  } catch {
+  } catch (e) {
+    console.warn(`postJSON ${path}: ${e}`);
     return null;
   }
 }

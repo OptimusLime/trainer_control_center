@@ -427,36 +427,60 @@ export async function fetchKernelPresets(): Promise<Record<string, number[][]> |
   return await fetchJSON<Record<string, number[][]>>('/iec/kernel_presets');
 }
 
+/** Guard: true while ensureIecSession is running. Prevents concurrent calls. */
+let _ensureLock = false;
+
 /** Auto-setup: check if session exists, set up if not.
  *  Retries up to 5 times with 2s delay if trainer isn't ready yet. */
 export async function ensureIecSession() {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    // Check for existing session
-    const state = await fetchJSON<IecState>('/iec/state');
-    if (state && state.active) {
-      const prev = $iec.get();
-      $iec.set({ ...prev, state, setupLoading: false });
-      await fetchReconstructions();
-      await fetchCheckpoints();
-      await fetchFeatureMaps();
-      return;
+  // Prevent concurrent calls (e.g. mount + user click)
+  if (_ensureLock) return;
+  _ensureLock = true;
+
+  // Show loading immediately — avoids flash of "No IEC session"
+  const init = $iec.get();
+  $iec.set({ ...init, setupLoading: true, toast: null });
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      // Check for existing session
+      const state = await fetchJSON<IecState>('/iec/state');
+      if (state && state.active) {
+        const prev = $iec.get();
+        $iec.set({ ...prev, state, setupLoading: false });
+        await fetchReconstructions();
+        await fetchCheckpoints();
+        await fetchFeatureMaps();
+        return;
+      }
+      // Try to create one
+      const result = await postJSON<IecSetupResponse>('/iec/setup');
+      if (result && result.state) {
+        const cur = $iec.get();
+        $iec.set({ ...cur, setupLoading: false, state: result.state, lossHistory: [] });
+        await fetchReconstructions();
+        await fetchCheckpoints();
+        await fetchFeatureMaps();
+        return;
+      }
+      // Setup returned null — might be 409 (session exists but setup rejected).
+      // Try fetching state one more time before retrying.
+      const retryState = await fetchJSON<IecState>('/iec/state');
+      if (retryState && retryState.active) {
+        const prev = $iec.get();
+        $iec.set({ ...prev, state: retryState, setupLoading: false });
+        await fetchReconstructions();
+        await fetchCheckpoints();
+        await fetchFeatureMaps();
+        return;
+      }
+      // Trainer probably not ready — wait and retry
+      if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
     }
-    // Try to create one
-    const prev = $iec.get();
-    $iec.set({ ...prev, setupLoading: true, toast: null });
-    const result = await postJSON<IecSetupResponse>('/iec/setup');
-    if (result && result.state) {
-      const cur = $iec.get();
-      $iec.set({ ...cur, setupLoading: false, state: result.state, lossHistory: [] });
-      await fetchReconstructions();
-      await fetchCheckpoints();
-      await fetchFeatureMaps();
-      return;
-    }
-    // Trainer probably not ready — wait and retry
-    await new Promise(r => setTimeout(r, 2000));
+    // All retries exhausted
+    const cur = $iec.get();
+    $iec.set({ ...cur, setupLoading: false, toast: 'Could not connect to trainer after 5 attempts' });
+  } finally {
+    _ensureLock = false;
   }
-  // All retries exhausted
-  const cur = $iec.get();
-  $iec.set({ ...cur, setupLoading: false, toast: 'Could not connect to trainer after 5 attempts' });
 }
